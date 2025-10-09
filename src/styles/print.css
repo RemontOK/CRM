@@ -8,6 +8,26 @@
     display: none !important;
   }
 
+  /* Скрываем уведомления toast при печати */
+  .go3958317564,
+  .go2072408551,
+  [class*="go3958317564"],
+  [class*="go2072408551"],
+  .react-hot-toast,
+  [data-react-hot-toast],
+  /* Дополнительные селекторы для toast уведомлений */
+  div[role="alert"],
+  div[aria-live="polite"],
+  div[aria-live="assertive"],
+  /* Скрываем все элементы с z-index выше 1000 (обычно уведомления) */
+  *[style*="z-index: 9999"],
+  *[style*="z-index: 10000"],
+  *[style*="z-index: 10001"] {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+  }
+
   /* Настройки страницы */
   @page {
     margin: 0;

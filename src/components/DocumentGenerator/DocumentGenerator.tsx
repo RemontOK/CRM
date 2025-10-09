@@ -63,7 +63,8 @@ const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
     setIsPrinting(true);
     try {
       window.print();
-      toast.success('Документ отправлен на печать');
+      // Убираем уведомление, так как оно мешает просмотру PDF
+      // toast.success('Документ отправлен на печать');
     } catch (error) {
       console.error('Ошибка при печати:', error);
       toast.error('Ошибка при печати');

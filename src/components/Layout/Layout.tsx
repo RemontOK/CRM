@@ -81,15 +81,15 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       <Box
         sx={{
           p: 3,
-          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+          background: '#1A1A1A',
           color: 'white',
           textAlign: 'center',
         }}
       >
-        <Typography variant="h5" fontWeight="bold">
-          НЭК Сервис
+        <Typography variant="h5" fontWeight="bold" sx={{ color: '#FF6B35' }}>
+          НЭК СЕРВИС
         </Typography>
-        <Typography variant="body2" sx={{ opacity: 0.9, mt: 0.5 }}>
+        <Typography variant="body2" sx={{ opacity: 0.9, mt: 0.5, color: '#9E9E9E' }}>
           CRM Система
         </Typography>
       </Box>
@@ -142,7 +142,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         sx={{
             width: { md: `calc(100% - ${drawerWidth}px)` },
             ml: { md: `${drawerWidth}px` },
-            backgroundColor: '#1A1A1A', // Темно-серый как в изображении
+            backgroundColor: '#1A1A1A',
             color: 'text.primary',
             boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
         }}
@@ -157,23 +157,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           >
             <MenuIcon />
           </IconButton>
-          
-          {/* Логотип НЭК СЕРВИС */}
-          <Box sx={{ display: 'flex', alignItems: 'center', mr: 3 }}>
-            <Typography
-              variant="h5"
-              component="div"
-              sx={{
-                fontWeight: 700,
-                color: 'primary.main',
-                fontSize: '1.5rem',
-                letterSpacing: '0.5px',
-                textShadow: '0 2px 4px rgba(0,0,0,0.3)',
-              }}
-            >
-              НЭК СЕРВИС
-            </Typography>
-          </Box>
           
           <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1, color: 'text.primary' }}>
             {menuItems.find(item => item.path === location.pathname)?.text || 'Дашборд'}
@@ -207,8 +190,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           left: { md: drawerWidth },
           right: 0,
           zIndex: 1100,
-          backgroundColor: '#2B2F3A',
-          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          backgroundColor: '#1A1A1A',
+          borderBottom: '1px solid rgba(255,107,53,0.2)',
           display: { xs: 'none', md: 'flex' }, // Скрываем на мобильных
           borderRadius: '0 0 8px 8px', // Скругленные углы снизу
         }}
@@ -225,10 +208,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               height: 4,
             },
             '&::-webkit-scrollbar-track': {
-              backgroundColor: '#2B2F3A',
+              backgroundColor: '#1A1A1A',
             },
             '&::-webkit-scrollbar-thumb': {
-              backgroundColor: '#4A4A4A',
+              backgroundColor: '#FF6B35',
               borderRadius: 2,
             },
           }}
@@ -247,9 +230,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                     cursor: 'pointer',
                     borderRadius: 1,
                     transition: 'all 0.2s ease-in-out',
-                    backgroundColor: isActive ? 'rgba(255,140,0,0.1)' : 'transparent',
+                    backgroundColor: isActive ? 'rgba(255,107,53,0.2)' : 'transparent',
                     '&:hover': {
-                      backgroundColor: isActive ? 'rgba(255,140,0,0.2)' : 'rgba(255,255,255,0.05)',
+                      backgroundColor: isActive ? 'rgba(255,107,53,0.3)' : 'rgba(255,107,53,0.1)',
                     },
                     whiteSpace: 'nowrap',
                     minWidth: 'fit-content',
@@ -271,7 +254,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                     sx={{
                       width: '1px',
                       height: '20px',
-                      backgroundColor: 'rgba(255,255,255,0.1)',
+                      backgroundColor: 'rgba(255,107,53,0.3)',
                       mx: 1,
                     }}
                   />
@@ -299,8 +282,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             '& .MuiDrawer-paper': { 
               boxSizing: 'border-box', 
               width: drawerWidth,
-              backgroundColor: '#2B2F3A',
-              borderRight: '1px solid rgba(255,255,255,0.1)',
+              backgroundColor: '#1A1A1A',
+              borderRight: '1px solid rgba(255,107,53,0.2)',
             },
           }}
         >
@@ -313,8 +296,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             '& .MuiDrawer-paper': { 
               boxSizing: 'border-box', 
               width: drawerWidth,
-              backgroundColor: '#2B2F3A',
-              borderRight: '1px solid rgba(255,255,255,0.1)',
+              backgroundColor: '#1A1A1A',
+              borderRight: '1px solid rgba(255,107,53,0.2)',
             },
           }}
           open
@@ -330,7 +313,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           width: { md: `calc(100% - ${drawerWidth}px)` },
             mt: { xs: 8, md: 12 }, // Учитываем навигационную панель на десктопе
           minHeight: 'calc(100vh - 64px)',
-          backgroundColor: 'background.default',
+          backgroundColor: '#1A1A1A',
         }}
       >
         <motion.div
