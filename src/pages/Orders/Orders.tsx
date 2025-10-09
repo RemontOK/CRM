@@ -416,7 +416,6 @@ const Orders: React.FC = () => {
         condition: newOrderData.deviceCondition,
         externalCondition: newOrderData.deviceExternalCondition,
         clientId: client.id,
-        createdAt: new Date().toISOString(),
       });
 
       // Создаем заказ
@@ -432,8 +431,6 @@ const Orders: React.FC = () => {
         estimatedDays: newOrderData.estimatedDays,
         parts: [],
         payments: [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
         isPaid: false,
         // Дополнительные поля для отображения
         clientName: newOrderData.clientName,
@@ -861,7 +858,7 @@ const Orders: React.FC = () => {
                    (screenProtection ? 2000 : 0) + 
                    (cleaning ? 1000 : 0),
         isPaid: true,
-        completedAt: new Date()
+        completedAt: new Date().toISOString()
       };
 
       await orderService.updateOrder(selectedOrder.id, updatedOrder);
@@ -1218,7 +1215,7 @@ const Orders: React.FC = () => {
       width: 150,
       renderCell: (params) => (
         <Typography variant="body2">
-          {params.value.toLocaleDateString('ru-RU')}
+          {new Date(params.value).toLocaleDateString('ru-RU')}
         </Typography>
       ),
     },
@@ -1498,7 +1495,7 @@ const Orders: React.FC = () => {
                   Дата создания
                 </Typography>
                 <Typography variant="body1">
-                  {selectedOrder.createdAt.toLocaleDateString('ru-RU')}
+                  {new Date(selectedOrder.createdAt).toLocaleDateString('ru-RU')}
                 </Typography>
               </Grid>
             </Grid>
@@ -1612,7 +1609,7 @@ const Orders: React.FC = () => {
                         Приоритет: <Chip label={selectedOrder.priority} color="secondary" size="small" />
                       </Typography>
                       <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                        Дата создания: {selectedOrder.createdAt.toLocaleDateString('ru-RU')}
+                        Дата создания: {new Date(selectedOrder.createdAt).toLocaleDateString('ru-RU')}
                       </Typography>
                     </Grid>
                     <Grid item xs={12} md={6}>

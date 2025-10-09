@@ -1,8 +1,8 @@
 import { Order, Client, Device, Payment } from '../types';
+import { clientService } from './clientService';
 
 class OrderService {
   private orders: Order[] = [];
-  private clients: Client[] = [];
   private devices: Device[] = [];
   private nextOrderNumber = 1;
 
@@ -12,16 +12,11 @@ class OrderService {
 
   private loadFromStorage() {
     const savedOrders = localStorage.getItem('crm_orders');
-    const savedClients = localStorage.getItem('crm_clients');
     const savedDevices = localStorage.getItem('crm_devices');
     const savedOrderNumber = localStorage.getItem('crm_next_order_number');
 
     if (savedOrders) {
       this.orders = JSON.parse(savedOrders);
-    }
-
-    if (savedClients) {
-      this.clients = JSON.parse(savedClients);
     }
 
     if (savedDevices) {
@@ -35,7 +30,6 @@ class OrderService {
 
   private saveToStorage() {
     localStorage.setItem('crm_orders', JSON.stringify(this.orders));
-    localStorage.setItem('crm_clients', JSON.stringify(this.clients));
     localStorage.setItem('crm_devices', JSON.stringify(this.devices));
     localStorage.setItem('crm_next_order_number', this.nextOrderNumber.toString());
   }
@@ -46,7 +40,7 @@ class OrderService {
     this.nextOrderNumber++;
 
     // Получаем данные клиента и устройства для отображения
-    const client = this.clients.find(c => c.id === orderData.clientId);
+    const client = clientService.getClients().find(c => c.id === orderData.clientId);
     const device = this.devices.find(d => d.id === orderData.deviceId);
 
     const newOrder: Order = {
@@ -162,47 +156,6 @@ class OrderService {
     return this.orders.filter(order => order.status === status);
   }
 
-  // Управление клиентами
-  async createClient(clientData: Partial<Client>): Promise<Client> {
-    const newClient: Client = {
-      id: Date.now().toString(),
-      firstName: clientData.firstName || '',
-      lastName: clientData.lastName || '',
-      phone: clientData.phone || '',
-      email: clientData.email || '',
-      address: clientData.address || '',
-      notes: clientData.notes || '',
-      totalOrders: 0,
-      totalSpent: 0,
-      lastVisit: new Date(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    this.clients.push(newClient);
-    this.saveToStorage();
-    return newClient;
-  }
-
-  async findClientByPhone(phone: string): Promise<Client | null> {
-    return this.clients.find(client => client.phone === phone) || null;
-  }
-
-  async updateClient(id: string, updates: Partial<Client>): Promise<Client> {
-    const index = this.clients.findIndex(client => client.id === id);
-    if (index === -1) {
-      throw new Error('Клиент не найден');
-    }
-
-    this.clients[index] = {
-      ...this.clients[index],
-      ...updates,
-      updatedAt: new Date(),
-    };
-
-    this.saveToStorage();
-    return this.clients[index];
-  }
 
   // Управление устройствами
   async createDevice(deviceData: Partial<Device>): Promise<Device> {
