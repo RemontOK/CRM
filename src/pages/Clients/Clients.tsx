@@ -52,6 +52,16 @@ const Clients: React.FC = () => {
   const [filterStatus, setFilterStatus] = useState('all');
   const [clients, setClients] = useState<Client[]>(getClients());
 
+  // Функция для обновления списка клиентов
+  const refreshClients = () => {
+    setClients(getClients());
+  };
+
+  // Обновляем список клиентов при монтировании компонента
+  React.useEffect(() => {
+    refreshClients();
+  }, []);
+
   const handleAddClient = () => {
     setIsAddDialogOpen(true);
   };
@@ -64,7 +74,7 @@ const Clients: React.FC = () => {
   const handleSaveClient = (clientData: Partial<Client>) => {
     try {
       const savedClient = clientService.createClient(clientData);
-      setClients(getClients());
+      refreshClients();
       setIsAddDialogOpen(false);
       toast.success('Клиент успешно добавлен');
     } catch (error) {
@@ -75,7 +85,7 @@ const Clients: React.FC = () => {
   const handleDeleteClient = (clientId: string) => {
     try {
       clientService.deleteClient(clientId);
-      setClients(getClients());
+      refreshClients();
       toast.success('Клиент удален');
     } catch (error) {
       toast.error('Ошибка при удалении клиента');
