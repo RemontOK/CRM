@@ -33,10 +33,11 @@
   "scripts": {
     "dev": "vite",
     "start": "vite",
-    "build": "tsc && vite build",
+    "build": "npx vite build",
     "preview": "vite preview",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "deploy": "npm run build && npx gh-pages -d build"
   },
   "eslintConfig": {
     "extends": [
@@ -59,6 +60,7 @@
   "devDependencies": {
     "@types/node": "^24.7.0",
     "@vitejs/plugin-react": "^5.0.4",
+    "gh-pages": "^6.3.0",
     "typescript": "^5.9.3",
     "vite": "^7.1.9"
   }

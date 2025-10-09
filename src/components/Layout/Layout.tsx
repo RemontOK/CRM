@@ -140,11 +140,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       <AppBar
         position="fixed"
         sx={{
-          width: { md: `calc(100% - ${drawerWidth}px)` },
-          ml: { md: `${drawerWidth}px` },
-          backgroundColor: 'white',
-          color: 'text.primary',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+            width: { md: `calc(100% - ${drawerWidth}px)` },
+            ml: { md: `${drawerWidth}px` },
+            backgroundColor: '#1A1A1A', // Темно-серый как в изображении
+            color: 'text.primary',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
         }}
       >
         <Toolbar>
@@ -157,7 +157,25 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           >
             <MenuIcon />
           </IconButton>
-          <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1 }}>
+          
+          {/* Логотип НЭК СЕРВИС */}
+          <Box sx={{ display: 'flex', alignItems: 'center', mr: 3 }}>
+            <Typography
+              variant="h5"
+              component="div"
+              sx={{
+                fontWeight: 700,
+                color: 'primary.main',
+                fontSize: '1.5rem',
+                letterSpacing: '0.5px',
+                textShadow: '0 2px 4px rgba(0,0,0,0.3)',
+              }}
+            >
+              НЭК СЕРВИС
+            </Typography>
+          </Box>
+          
+          <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1, color: 'text.primary' }}>
             {menuItems.find(item => item.path === location.pathname)?.text || 'Дашборд'}
           </Typography>
           <IconButton color="inherit" sx={{ mr: 1 }}>
@@ -180,6 +198,90 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           </IconButton>
         </Toolbar>
       </AppBar>
+      
+      {/* Горизонтальная навигационная панель */}
+      <Box
+        sx={{
+          position: 'fixed',
+          top: 64, // Под AppBar
+          left: { md: drawerWidth },
+          right: 0,
+          zIndex: 1100,
+          backgroundColor: '#2B2F3A',
+          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          display: { xs: 'none', md: 'flex' }, // Скрываем на мобильных
+          borderRadius: '0 0 8px 8px', // Скругленные углы снизу
+        }}
+      >
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            px: 2,
+            py: 1,
+            width: '100%',
+            overflowX: 'auto',
+            '&::-webkit-scrollbar': {
+              height: 4,
+            },
+            '&::-webkit-scrollbar-track': {
+              backgroundColor: '#2B2F3A',
+            },
+            '&::-webkit-scrollbar-thumb': {
+              backgroundColor: '#4A4A4A',
+              borderRadius: 2,
+            },
+          }}
+        >
+          {menuItems.map((item, index) => {
+            const isActive = location.pathname === item.path;
+            return (
+              <React.Fragment key={item.text}>
+                <Box
+                  onClick={() => navigate(item.path)}
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    px: 2,
+                    py: 1,
+                    cursor: 'pointer',
+                    borderRadius: 1,
+                    transition: 'all 0.2s ease-in-out',
+                    backgroundColor: isActive ? 'rgba(255,140,0,0.1)' : 'transparent',
+                    '&:hover': {
+                      backgroundColor: isActive ? 'rgba(255,140,0,0.2)' : 'rgba(255,255,255,0.05)',
+                    },
+                    whiteSpace: 'nowrap',
+                    minWidth: 'fit-content',
+                  }}
+                >
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      fontWeight: isActive ? 600 : 400,
+                      fontSize: '0.875rem',
+                      color: isActive ? 'primary.main' : 'text.secondary',
+                    }}
+                  >
+                    {item.text}
+                  </Typography>
+                </Box>
+                {index < menuItems.length - 1 && (
+                  <Box
+                    sx={{
+                      width: '1px',
+                      height: '20px',
+                      backgroundColor: 'rgba(255,255,255,0.1)',
+                      mx: 1,
+                    }}
+                  />
+                )}
+              </React.Fragment>
+            );
+          })}
+        </Box>
+      </Box>
+      
       <Box
         component="nav"
         sx={{ width: { md: drawerWidth }, flexShrink: { md: 0 } }}
@@ -194,7 +296,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           }}
           sx={{
             display: { xs: 'block', md: 'none' },
-            '& .MuiDrawer-paper': { boxSizing: 'border-box', width: drawerWidth },
+            '& .MuiDrawer-paper': { 
+              boxSizing: 'border-box', 
+              width: drawerWidth,
+              backgroundColor: '#2B2F3A',
+              borderRight: '1px solid rgba(255,255,255,0.1)',
+            },
           }}
         >
           {drawer}
@@ -203,7 +310,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           variant="permanent"
           sx={{
             display: { xs: 'none', md: 'block' },
-            '& .MuiDrawer-paper': { boxSizing: 'border-box', width: drawerWidth },
+            '& .MuiDrawer-paper': { 
+              boxSizing: 'border-box', 
+              width: drawerWidth,
+              backgroundColor: '#2B2F3A',
+              borderRight: '1px solid rgba(255,255,255,0.1)',
+            },
           }}
           open
         >
@@ -216,7 +328,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           flexGrow: 1,
           p: 3,
           width: { md: `calc(100% - ${drawerWidth}px)` },
-          mt: 8,
+            mt: { xs: 8, md: 12 }, // Учитываем навигационную панель на десктопе
           minHeight: 'calc(100vh - 64px)',
           backgroundColor: 'background.default',
         }}
