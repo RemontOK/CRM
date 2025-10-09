@@ -36,101 +36,56 @@ import {
 import { motion } from 'framer-motion';
 import { DataGrid, GridColDef } from '@mui/x-data-grid';
 import toast from 'react-hot-toast';
+import { clientService } from '../../services/clientService';
+import { Client } from '../../types';
 
-// Mock data
-const clients = [
-  {
-    id: '1',
-    firstName: 'Анна',
-    lastName: 'Иванова',
-    phone: '+7 (999) 123-45-67',
-    email: 'anna.ivanova@email.com',
-    address: 'ул. Ленина, д. 10, кв. 5',
-    notes: 'VIP клиент',
-    totalOrders: 15,
-    totalSpent: 125000,
-    lastVisit: new Date('2024-01-15'),
-    createdAt: new Date('2023-06-15'),
-    updatedAt: new Date('2024-01-15'),
-  },
-  {
-    id: '2',
-    firstName: 'Петр',
-    lastName: 'Петров',
-    phone: '+7 (999) 234-56-78',
-    email: 'petr.petrov@email.com',
-    address: 'ул. Пушкина, д. 25, кв. 12',
-    notes: 'Часто заказывает ремонт телефонов',
-    totalOrders: 8,
-    totalSpent: 45000,
-    lastVisit: new Date('2024-01-10'),
-    createdAt: new Date('2023-08-20'),
-    updatedAt: new Date('2024-01-10'),
-  },
-  {
-    id: '3',
-    firstName: 'Мария',
-    lastName: 'Сидорова',
-    phone: '+7 (999) 345-67-89',
-    email: 'maria.sidorova@email.com',
-    address: 'ул. Гагарина, д. 5, кв. 8',
-    notes: 'Предпочитает оригинальные запчасти',
-    totalOrders: 12,
-    totalSpent: 78000,
-    lastVisit: new Date('2024-01-12'),
-    createdAt: new Date('2023-07-10'),
-    updatedAt: new Date('2024-01-12'),
-  },
-  {
-    id: '4',
-    firstName: 'Алексей',
-    lastName: 'Козлов',
-    phone: '+7 (999) 456-78-90',
-    email: 'alexey.kozlov@email.com',
-    address: 'ул. Мира, д. 15, кв. 3',
-    notes: 'Новый клиент',
-    totalOrders: 3,
-    totalSpent: 15000,
-    lastVisit: new Date('2024-01-08'),
-    createdAt: new Date('2023-12-01'),
-    updatedAt: new Date('2024-01-08'),
-  },
-  {
-    id: '5',
-    firstName: 'Елена',
-    lastName: 'Волкова',
-    phone: '+7 (999) 567-89-01',
-    email: 'elena.volkova@email.com',
-    address: 'ул. Советская, д. 30, кв. 15',
-    notes: 'Корпоративный клиент',
-    totalOrders: 25,
-    totalSpent: 200000,
-    lastVisit: new Date('2024-01-14'),
-    createdAt: new Date('2023-05-15'),
-    updatedAt: new Date('2024-01-14'),
-  },
-];
+// Получаем клиентов из localStorage
+const getClients = (): Client[] => {
+  return clientService.getClients();
+};
 
 const Clients: React.FC = () => {
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
-  const [selectedClient, setSelectedClient] = useState<any>(null);
+  const [selectedClient, setSelectedClient] = useState<Client | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
+  const [clients, setClients] = useState<Client[]>(getClients());
 
   const handleAddClient = () => {
     setIsAddDialogOpen(true);
   };
 
-  const handleViewClient = (client: any) => {
+  const handleViewClient = (client: Client) => {
     setSelectedClient(client);
     setIsViewDialogOpen(true);
+  };
+
+  const handleSaveClient = (clientData: Partial<Client>) => {
+    try {
+      const savedClient = clientService.createClient(clientData);
+      setClients(getClients());
+      setIsAddDialogOpen(false);
+      toast.success('Клиент успешно добавлен');
+    } catch (error) {
+      toast.error('Ошибка при сохранении клиента');
+    }
+  };
+
+  const handleDeleteClient = (clientId: string) => {
+    try {
+      clientService.deleteClient(clientId);
+      setClients(getClients());
+      toast.success('Клиент удален');
+    } catch (error) {
+      toast.error('Ошибка при удалении клиента');
+    }
   };
 
   const getClientStats = () => {
     const totalClients = clients.length;
     const newClientsThisMonth = clients.filter(
-      client => client.createdAt.getMonth() === new Date().getMonth()
+      client => new Date(client.createdAt).getMonth() === new Date().getMonth()
     ).length;
     const totalSpent = clients.reduce((sum, client) => sum + client.totalSpent, 0);
     const averageOrderValue = clients.reduce((sum, client) => sum + client.totalOrders, 0) / totalClients;

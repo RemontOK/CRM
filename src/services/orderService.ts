@@ -17,28 +17,15 @@ class OrderService {
     const savedOrderNumber = localStorage.getItem('crm_next_order_number');
 
     if (savedOrders) {
-      this.orders = JSON.parse(savedOrders).map((order: any) => ({
-        ...order,
-        createdAt: new Date(order.createdAt),
-        updatedAt: new Date(order.updatedAt),
-        completedAt: order.completedAt ? new Date(order.completedAt) : undefined,
-      }));
+      this.orders = JSON.parse(savedOrders);
     }
 
     if (savedClients) {
-      this.clients = JSON.parse(savedClients).map((client: any) => ({
-        ...client,
-        createdAt: new Date(client.createdAt),
-        updatedAt: new Date(client.updatedAt),
-        lastVisit: client.lastVisit ? new Date(client.lastVisit) : undefined,
-      }));
+      this.clients = JSON.parse(savedClients);
     }
 
     if (savedDevices) {
-      this.devices = JSON.parse(savedDevices).map((device: any) => ({
-        ...device,
-        createdAt: new Date(device.createdAt),
-      }));
+      this.devices = JSON.parse(savedDevices);
     }
 
     if (savedOrderNumber) {
@@ -79,8 +66,8 @@ class OrderService {
       parts: orderData.parts || [],
       payments: orderData.payments || [],
       isPaid: orderData.isPaid || false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       completedAt: orderData.completedAt,
       
       // Дополнительные поля для отображения
@@ -188,8 +175,8 @@ class OrderService {
       totalOrders: 0,
       totalSpent: 0,
       lastVisit: new Date(),
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
 
     this.clients.push(newClient);
@@ -228,8 +215,9 @@ class OrderService {
       imei: deviceData.imei || '',
       color: deviceData.color || '',
       condition: deviceData.condition || 'good',
+      externalCondition: deviceData.externalCondition || '',
       clientId: deviceData.clientId || '',
-      createdAt: new Date(),
+      createdAt: new Date().toISOString(),
     };
 
     this.devices.push(newDevice);

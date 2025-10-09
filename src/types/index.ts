@@ -22,9 +22,9 @@ export interface Client {
   notes?: string;
   totalOrders: number;
   totalSpent: number;
-  lastVisit?: Date;
-  createdAt: Date;
-  updatedAt: Date;
+  lastOrderDate?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Device {
@@ -38,7 +38,7 @@ export interface Device {
   condition: 'excellent' | 'good' | 'fair' | 'poor';
   externalCondition?: string; // Сколы, потертости, скрытые дефекты
   clientId: string;
-  createdAt: Date;
+  createdAt: string;
 }
 
 export interface Order {
@@ -58,9 +58,9 @@ export interface Order {
   estimatedTime?: string; // добавлено поле estimatedTime
   parts: OrderPart[];
   payments: Payment[];
-  createdAt: Date;
-  updatedAt: Date;
-  completedAt?: Date;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
   isPaid: boolean; // оплачен ли заказ
   
   // Дополнительные поля для отображения в таблице

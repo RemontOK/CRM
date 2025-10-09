@@ -43,6 +43,7 @@ import { DataGrid, GridColDef } from '@mui/x-data-grid';
 import toast from 'react-hot-toast';
 import { orderService } from '../../services/orderService';
 import { documentService } from '../../services/documentService';
+import { clientService } from '../../services/clientService';
 import { Order, AcceptanceAct, WorkCompletionAct, Client, Device, WorkItem, OrderPart, PartItem } from '../../types';
 import DocumentGenerator from '../../components/DocumentGenerator/DocumentGenerator';
 import CreateOrderForm from '../../components/CreateOrderForm/CreateOrderForm';
@@ -288,6 +289,8 @@ const Orders: React.FC = () => {
     clientName: '',
     clientPhone: '',
     clientEmail: '',
+    clientAddress: '',
+    clientNotes: '',
     
     // Шаг 2: Устройство
     deviceType: 'phone' as 'phone' | 'tablet' | 'laptop' | 'desktop' | 'other',
@@ -339,6 +342,8 @@ const Orders: React.FC = () => {
       clientName: '',
       clientPhone: '',
       clientEmail: '',
+      clientAddress: '',
+      clientNotes: '',
       deviceType: 'phone',
       deviceBrand: '',
       deviceModel: '',
@@ -376,17 +381,29 @@ const Orders: React.FC = () => {
 
   const handleCreateOrderFromSteps = async () => {
     try {
-      // Создаем клиента
-      const client = await orderService.createClient({
-        firstName: newOrderData.clientName.split(' ')[0] || '',
-        lastName: newOrderData.clientName.split(' ').slice(1).join(' ') || '',
-        phone: newOrderData.clientPhone,
-        email: newOrderData.clientEmail,
-        totalOrders: 0,
-        totalSpent: 0,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
+      // Проверяем, существует ли клиент с таким телефоном
+      let client = clientService.findClientByPhone(newOrderData.clientPhone);
+      
+      if (!client) {
+        // Создаем нового клиента
+        client = clientService.createClient({
+          firstName: newOrderData.clientName.split(' ')[0] || '',
+          lastName: newOrderData.clientName.split(' ').slice(1).join(' ') || '',
+          phone: newOrderData.clientPhone,
+          email: newOrderData.clientEmail,
+          address: newOrderData.clientAddress,
+          notes: newOrderData.clientNotes,
+        });
+      } else {
+        // Обновляем существующего клиента, если изменились данные
+        client = clientService.updateClient(client.id, {
+          firstName: newOrderData.clientName.split(' ')[0] || '',
+          lastName: newOrderData.clientName.split(' ').slice(1).join(' ') || '',
+          email: newOrderData.clientEmail,
+          address: newOrderData.clientAddress,
+          notes: newOrderData.clientNotes,
+        }) || client;
+      }
 
       // Создаем устройство
       const device = await orderService.createDevice({
@@ -399,7 +416,7 @@ const Orders: React.FC = () => {
         condition: newOrderData.deviceCondition,
         externalCondition: newOrderData.deviceExternalCondition,
         clientId: client.id,
-        createdAt: new Date(),
+        createdAt: new Date().toISOString(),
       });
 
       // Создаем заказ
@@ -415,8 +432,8 @@ const Orders: React.FC = () => {
         estimatedDays: newOrderData.estimatedDays,
         parts: [],
         payments: [],
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
         isPaid: false,
         // Дополнительные поля для отображения
         clientName: newOrderData.clientName,
@@ -454,8 +471,8 @@ const Orders: React.FC = () => {
         notes: '',
         totalOrders: 0,
         totalSpent: 0,
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
 
       // Создаем устройство
@@ -470,7 +487,7 @@ const Orders: React.FC = () => {
         condition: 'fair',
         externalCondition: formData.appearance || 'Не указано',
         clientId: client.id,
-        createdAt: new Date(),
+        createdAt: new Date().toISOString(),
       };
 
       // Создаем заказ
@@ -491,8 +508,8 @@ const Orders: React.FC = () => {
         estimatedTime: '1 день',
         parts: [],
         payments: [],
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
         completedAt: undefined,
         isPaid: false,
         clientName: formData.clientName,
@@ -514,7 +531,7 @@ const Orders: React.FC = () => {
 
       // Показываем уведомление только после закрытия документа
       setTimeout(() => {
-        toast.success('Заказ успешно создан');
+      toast.success('Заказ успешно создан');
       }, 1000);
     } catch (error) {
       console.error('Ошибка при создании заказа:', error);
@@ -905,8 +922,8 @@ const Orders: React.FC = () => {
         notes: '',
         totalOrders: 0,
         totalSpent: 0,
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
 
       const deviceData = device || {
@@ -920,7 +937,7 @@ const Orders: React.FC = () => {
         condition: order.deviceCondition as any || 'good',
         externalCondition: order.deviceExternalCondition,
         clientId: order.clientId,
-        createdAt: new Date(),
+        createdAt: new Date().toISOString(),
       };
 
       const acceptanceAct = await documentService.createAcceptanceAct(
@@ -958,8 +975,8 @@ const Orders: React.FC = () => {
         notes: '',
         totalOrders: 0,
         totalSpent: 0,
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
 
       const device: Device = {
@@ -973,7 +990,7 @@ const Orders: React.FC = () => {
         condition: order.deviceCondition as any || 'good',
         externalCondition: order.deviceExternalCondition,
         clientId: order.clientId,
-        createdAt: new Date(),
+        createdAt: new Date().toISOString(),
       };
 
       // Создаем список выполненных работ на основе order.parts
