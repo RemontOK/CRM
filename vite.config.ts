@@ -11,7 +11,17 @@ export default defineConfig({
   },
   build: {
     outDir: 'build',
-    sourcemap: true,
+    sourcemap: false, // Отключаем source map для уменьшения размера
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ['react', 'react-dom'],
+          mui: ['@mui/material', '@mui/icons-material'],
+          router: ['react-router-dom'],
+          charts: ['recharts'],
+        },
+      },
+    },
   },
   resolve: {
     alias: {
