@@ -9,7 +9,7 @@
       name="description"
       content="CRM система для сервисного центра НЭК сервис"
     />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https: http: blob: https://yastatic.net; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com;">
+    <meta http-equiv="Content-Security-Policy" content="default-src *; img-src * data: blob:; script-src * 'unsafe-inline' 'unsafe-eval'; style-src * 'unsafe-inline'; font-src *; connect-src *; frame-src *;">
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css?family=Roboto:300,400,500,700&display=swap"
@@ -19,24 +19,6 @@
       href="https://fonts.googleapis.com/icon?family=Material+Icons"
     />
     <title>НЭК Сервис - CRM</title>
-    <script type="text/javascript">
-      // Single Page Apps for GitHub Pages
-      // https://github.com/rafgraph/spa-github-pages
-      
-      (function(l) {
-        if (l.search[1] === '/' ) {
-          var decoded = l.search.slice(1).split('&').map(function(s) { 
-            return s.replace(/~and~/g, '&')
-          }).join('?');
-          var newPath = l.pathname.slice(0, -1) + decoded + l.hash;
-          // Убираем лишний / в начале, если есть
-          if (newPath[0] === '/' && newPath[1] === '/') {
-            newPath = newPath.slice(1);
-          }
-          window.history.replaceState(null, null, newPath);
-        }
-      }(window.location))
-    </script>
     <script type="module" crossorigin src="./assets/index-d2393ac1.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/vendor-73f70a13.js">
     <link rel="modulepreload" crossorigin href="./assets/mui-cf286d38.js">
