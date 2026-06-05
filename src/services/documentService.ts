@@ -1,14 +1,52 @@
-import { 
-  AcceptanceAct, 
-  WorkCompletionAct, 
-  ElectronicSignature, 
-  DocumentStorage,
-  Order,
+﻿import {
+  AcceptanceAct,
   Client,
   Device,
+  DocumentStorage,
+  ElectronicSignature,
+  Order,
+  PartItem,
+  WorkCompletionAct,
   WorkItem,
-  PartItem
 } from '../types';
+import { apiService } from './api';
+
+const ACCEPTANCE_CACHE_KEY = 'crm_acceptance_acts';
+const COMPLETION_CACHE_KEY = 'crm_work_completion_acts';
+const STORAGE_CACHE_KEY = 'crm_document_storage';
+
+const normalizeSignature = (signature?: ElectronicSignature | null): ElectronicSignature | undefined =>
+  signature
+    ? {
+        ...signature,
+        signedAt: new Date(signature.signedAt),
+      }
+    : undefined;
+
+const normalizeAcceptanceAct = (act: AcceptanceAct): AcceptanceAct => ({
+  ...act,
+  acceptanceDate: new Date(act.acceptanceDate),
+  createdAt: new Date(act.createdAt),
+  updatedAt: new Date(act.updatedAt),
+  printedAt: act.printedAt ? new Date(act.printedAt) : undefined,
+  clientSignature: normalizeSignature(act.clientSignature),
+  masterSignature: normalizeSignature(act.masterSignature),
+});
+
+const normalizeCompletionAct = (act: WorkCompletionAct): WorkCompletionAct => ({
+  ...act,
+  completionDate: new Date(act.completionDate),
+  createdAt: new Date(act.createdAt),
+  updatedAt: new Date(act.updatedAt),
+  printedAt: act.printedAt ? new Date(act.printedAt) : undefined,
+  clientSignature: normalizeSignature(act.clientSignature),
+  masterSignature: normalizeSignature(act.masterSignature),
+});
+
+const normalizeStorage = (item: DocumentStorage): DocumentStorage => ({
+  ...item,
+  createdAt: new Date(item.createdAt),
+});
 
 class DocumentService {
   private acceptanceActs: AcceptanceAct[] = [];
@@ -16,65 +54,46 @@ class DocumentService {
   private documentStorage: DocumentStorage[] = [];
 
   constructor() {
-    this.loadFromStorage();
+    this.loadCache();
   }
 
-  private loadFromStorage() {
-    const savedAcceptanceActs = localStorage.getItem('crm_acceptance_acts');
-    const savedWorkCompletionActs = localStorage.getItem('crm_work_completion_acts');
-    const savedDocumentStorage = localStorage.getItem('crm_document_storage');
+  private loadCache() {
+    try {
+      const acceptance = localStorage.getItem(ACCEPTANCE_CACHE_KEY);
+      const completion = localStorage.getItem(COMPLETION_CACHE_KEY);
+      const storage = localStorage.getItem(STORAGE_CACHE_KEY);
 
-    if (savedAcceptanceActs) {
-      this.acceptanceActs = JSON.parse(savedAcceptanceActs).map((act: any) => ({
-        ...act,
-        acceptanceDate: new Date(act.acceptanceDate),
-        createdAt: new Date(act.createdAt),
-        updatedAt: new Date(act.updatedAt),
-        printedAt: act.printedAt ? new Date(act.printedAt) : undefined,
-        clientSignature: act.clientSignature ? {
-          ...act.clientSignature,
-          signedAt: new Date(act.clientSignature.signedAt)
-        } : undefined,
-        masterSignature: act.masterSignature ? {
-          ...act.masterSignature,
-          signedAt: new Date(act.masterSignature.signedAt)
-        } : undefined,
-      }));
-    }
-
-    if (savedWorkCompletionActs) {
-      this.workCompletionActs = JSON.parse(savedWorkCompletionActs).map((act: any) => ({
-        ...act,
-        completionDate: new Date(act.completionDate),
-        createdAt: new Date(act.createdAt),
-        updatedAt: new Date(act.updatedAt),
-        printedAt: act.printedAt ? new Date(act.printedAt) : undefined,
-        clientSignature: act.clientSignature ? {
-          ...act.clientSignature,
-          signedAt: new Date(act.clientSignature.signedAt)
-        } : undefined,
-        masterSignature: act.masterSignature ? {
-          ...act.masterSignature,
-          signedAt: new Date(act.masterSignature.signedAt)
-        } : undefined,
-      }));
-    }
-
-    if (savedDocumentStorage) {
-      this.documentStorage = JSON.parse(savedDocumentStorage).map((storage: any) => ({
-        ...storage,
-        createdAt: new Date(storage.createdAt)
-      }));
+      this.acceptanceActs = acceptance ? JSON.parse(acceptance).map(normalizeAcceptanceAct) : [];
+      this.workCompletionActs = completion ? JSON.parse(completion).map(normalizeCompletionAct) : [];
+      this.documentStorage = storage ? JSON.parse(storage).map(normalizeStorage) : [];
+    } catch {
+      this.acceptanceActs = [];
+      this.workCompletionActs = [];
+      this.documentStorage = [];
     }
   }
 
-  private saveToStorage() {
-    localStorage.setItem('crm_acceptance_acts', JSON.stringify(this.acceptanceActs));
-    localStorage.setItem('crm_work_completion_acts', JSON.stringify(this.workCompletionActs));
-    localStorage.setItem('crm_document_storage', JSON.stringify(this.documentStorage));
+  private saveCache() {
+    localStorage.setItem(ACCEPTANCE_CACHE_KEY, JSON.stringify(this.acceptanceActs));
+    localStorage.setItem(COMPLETION_CACHE_KEY, JSON.stringify(this.workCompletionActs));
+    localStorage.setItem(STORAGE_CACHE_KEY, JSON.stringify(this.documentStorage));
   }
 
-  // Создание акта приема-передачи
+  private syncAcceptance(acts: AcceptanceAct[]) {
+    this.acceptanceActs = acts.map(normalizeAcceptanceAct);
+    this.saveCache();
+  }
+
+  private syncCompletion(acts: WorkCompletionAct[]) {
+    this.workCompletionActs = acts.map(normalizeCompletionAct);
+    this.saveCache();
+  }
+
+  private syncStorage(items: DocumentStorage[]) {
+    this.documentStorage = items.map(normalizeStorage);
+    this.saveCache();
+  }
+
   async createAcceptanceAct(
     order: Order,
     client: Client,
@@ -82,33 +101,28 @@ class DocumentService {
     problemDescription: string,
     preliminaryCost: number,
     acceptedBy: string,
-    conditions: string = 'Устройство принимается на диагностику и ремонт. В случае отказа от ремонта взимается плата за диагностику.'
+    conditions = 'Устройство принимается на бесплатную диагностику и ремонт.',
+    advancePayment = 0
   ): Promise<AcceptanceAct> {
-    const documentNumber = `АП-${Date.now()}`;
-    
-    const acceptanceAct: AcceptanceAct = {
-      id: Date.now().toString(),
+    const payload = {
       orderId: order.id,
       orderNumber: order.orderNumber,
       client,
       device,
       problemDescription,
       preliminaryCost,
-      acceptanceDate: new Date(),
+      advancePayment,
+      acceptanceDate: new Date().toISOString(),
       acceptedBy,
       conditions,
-      documentNumber,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     };
 
-    this.acceptanceActs.push(acceptanceAct);
-    this.saveToStorage();
-    
-    return acceptanceAct;
+    const created = normalizeAcceptanceAct(await apiService.post<AcceptanceAct>('/documents/acceptance-acts', payload));
+    this.acceptanceActs = [created, ...this.acceptanceActs.filter((item) => item.id !== created.id)];
+    this.saveCache();
+    return created;
   }
 
-  // Создание акта выполненных работ
   async createWorkCompletionAct(
     order: Order,
     client: Client,
@@ -119,10 +133,7 @@ class DocumentService {
     warrantyPeriod: number,
     completedBy: string
   ): Promise<WorkCompletionAct> {
-    const documentNumber = `АВР-${Date.now()}`;
-    
-    const workCompletionAct: WorkCompletionAct = {
-      id: Date.now().toString(),
+    const payload = {
       orderId: order.id,
       orderNumber: order.orderNumber,
       client,
@@ -131,20 +142,16 @@ class DocumentService {
       partsUsed,
       totalCost,
       warrantyPeriod,
-      completionDate: new Date(),
+      completionDate: new Date().toISOString(),
       completedBy,
-      documentNumber,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     };
 
-    this.workCompletionActs.push(workCompletionAct);
-    this.saveToStorage();
-    
-    return workCompletionAct;
+    const created = normalizeCompletionAct(await apiService.post<WorkCompletionAct>('/documents/completion-acts', payload));
+    this.workCompletionActs = [created, ...this.workCompletionActs.filter((item) => item.id !== created.id)];
+    this.saveCache();
+    return created;
   }
 
-  // Добавление электронной подписи
   async addSignature(
     documentId: string,
     documentType: 'acceptance' | 'completion',
@@ -154,81 +161,99 @@ class DocumentService {
     ipAddress?: string,
     userAgent?: string
   ): Promise<void> {
-    const signature: ElectronicSignature = {
-      id: Date.now().toString(),
+    const signature = {
       signerName,
       signerRole,
       signatureData,
-      signedAt: new Date(),
       ipAddress,
       userAgent,
     };
 
     if (documentType === 'acceptance') {
-      const act = this.acceptanceActs.find(a => a.id === documentId);
-      if (act) {
-        if (signerRole === 'client') {
-          act.clientSignature = signature;
-        } else {
-          act.masterSignature = signature;
-        }
-        act.updatedAt = new Date();
-      }
+      const updated = normalizeAcceptanceAct(
+        await apiService.post<AcceptanceAct>(`/documents/acceptance-acts/${documentId}/signature`, signature)
+      );
+      this.acceptanceActs = this.acceptanceActs.map((item) => (item.id === updated.id ? updated : item));
     } else {
-      const act = this.workCompletionActs.find(a => a.id === documentId);
-      if (act) {
-        if (signerRole === 'client') {
-          act.clientSignature = signature;
-        } else {
-          act.masterSignature = signature;
-        }
-        act.updatedAt = new Date();
-      }
+      const updated = normalizeCompletionAct(
+        await apiService.post<WorkCompletionAct>(`/documents/completion-acts/${documentId}/signature`, signature)
+      );
+      this.workCompletionActs = this.workCompletionActs.map((item) => (item.id === updated.id ? updated : item));
     }
 
-    this.saveToStorage();
+    this.saveCache();
   }
 
-  // Получение акта приема-передачи по ID заказа
   async getAcceptanceActByOrderId(orderId: string): Promise<AcceptanceAct | null> {
-    return this.acceptanceActs.find(act => act.orderId === orderId) || null;
+    try {
+      const act = await apiService.get<AcceptanceAct | null>('/documents/acceptance-acts', { orderId });
+      if (!act) {
+        return null;
+      }
+
+      const normalized = normalizeAcceptanceAct(act);
+      this.acceptanceActs = [normalized, ...this.acceptanceActs.filter((item) => item.id !== normalized.id)];
+      this.saveCache();
+      return normalized;
+    } catch {
+      return this.acceptanceActs.find((item) => item.orderId === orderId) || null;
+    }
   }
 
-  // Получение акта выполненных работ по ID заказа
   async getWorkCompletionActByOrderId(orderId: string): Promise<WorkCompletionAct | null> {
-    return this.workCompletionActs.find(act => act.orderId === orderId) || null;
+    try {
+      const act = await apiService.get<WorkCompletionAct | null>('/documents/completion-acts', { orderId });
+      if (!act) {
+        return null;
+      }
+
+      const normalized = normalizeCompletionAct(act);
+      this.workCompletionActs = [normalized, ...this.workCompletionActs.filter((item) => item.id !== normalized.id)];
+      this.saveCache();
+      return normalized;
+    } catch {
+      return this.workCompletionActs.find((item) => item.orderId === orderId) || null;
+    }
   }
 
-  // Получение всех актов приема-передачи
   async getAcceptanceActs(): Promise<AcceptanceAct[]> {
+    try {
+      const acts = await apiService.get<AcceptanceAct[]>('/documents/acceptance-acts');
+      this.syncAcceptance(acts);
+    } catch {
+      // Fallback to cache
+    }
+
     return this.acceptanceActs;
   }
 
-  // Получение всех актов выполненных работ
   async getWorkCompletionActs(): Promise<WorkCompletionAct[]> {
+    try {
+      const acts = await apiService.get<WorkCompletionAct[]>('/documents/completion-acts');
+      this.syncCompletion(acts);
+    } catch {
+      // Fallback to cache
+    }
+
     return this.workCompletionActs;
   }
 
-  // Отметка о печати документа
   async markDocumentAsPrinted(documentId: string, documentType: 'acceptance' | 'completion'): Promise<void> {
     if (documentType === 'acceptance') {
-      const act = this.acceptanceActs.find(a => a.id === documentId);
-      if (act) {
-        act.printedAt = new Date();
-        act.updatedAt = new Date();
-      }
+      const updated = normalizeAcceptanceAct(
+        await apiService.post<AcceptanceAct>(`/documents/acceptance-acts/${documentId}/printed`)
+      );
+      this.acceptanceActs = this.acceptanceActs.map((item) => (item.id === updated.id ? updated : item));
     } else {
-      const act = this.workCompletionActs.find(a => a.id === documentId);
-      if (act) {
-        act.printedAt = new Date();
-        act.updatedAt = new Date();
-      }
+      const updated = normalizeCompletionAct(
+        await apiService.post<WorkCompletionAct>(`/documents/completion-acts/${documentId}/printed`)
+      );
+      this.workCompletionActs = this.workCompletionActs.map((item) => (item.id === updated.id ? updated : item));
     }
 
-    this.saveToStorage();
+    this.saveCache();
   }
 
-  // Сохранение документа в хранилище
   async saveDocumentToStorage(
     orderId: string,
     documentType: 'acceptance' | 'completion',
@@ -237,24 +262,30 @@ class DocumentService {
     fileSize: number,
     mimeType: string
   ): Promise<void> {
-    const storage: DocumentStorage = {
-      id: Date.now().toString(),
-      orderId,
-      documentType,
-      documentId,
-      filePath,
-      fileSize,
-      mimeType,
-      createdAt: new Date(),
-    };
+    const created = normalizeStorage(
+      await apiService.post<DocumentStorage>('/documents/storage', {
+        orderId,
+        documentType,
+        documentId,
+        filePath,
+        fileSize,
+        mimeType,
+      })
+    );
 
-    this.documentStorage.push(storage);
-    this.saveToStorage();
+    this.documentStorage = [created, ...this.documentStorage.filter((item) => item.id !== created.id)];
+    this.saveCache();
   }
 
-  // Получение документов по заказу
   async getDocumentsByOrderId(orderId: string): Promise<DocumentStorage[]> {
-    return this.documentStorage.filter(doc => doc.orderId === orderId);
+    try {
+      const items = await apiService.get<DocumentStorage[]>('/documents/storage', { orderId });
+      this.syncStorage(items);
+    } catch {
+      // Fallback to cache
+    }
+
+    return this.documentStorage.filter((item) => item.orderId === orderId);
   }
 }
 

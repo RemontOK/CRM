@@ -1,108 +1,67 @@
-/* Импорт стилей для печати */
 @import './styles/print.css';
+@import './styles/utilities.css';
+
+/*
+  Быстрое редактирование внешнего вида:
+  1. src/styles/tokens.ts   -> цвета, радиусы, тени, градиенты
+  2. src/styles/ui.ts       -> общие page/layout контейнеры
+  3. src/styles/recipes.ts  -> карточки, таблицы, диалоги, metric-блоки
+  4. src/theme.ts           -> глобальное поведение MUI-компонентов
+*/
 
 * {
-  margin: 0;
-  padding: 0;
   box-sizing: border-box;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
-  font-family: 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  margin: 0;
+  min-width: 320px;
+  color: #0f172a;
+  font-family: 'Manrope', 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #1A1A1A;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+body,
+#root {
+  background: var(--crm-bg);
 }
 
 code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
-    monospace;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
 }
 
-/* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #F5F5F5;
+  background: rgba(148, 163, 184, 0.18);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #FF6B35;
-  border-radius: 4px;
+  background: linear-gradient(180deg, #fb923c 0%, #ea580c 100%);
+  border-radius: 999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #E64A19;
+  background: linear-gradient(180deg, #f97316 0%, #c2410c 100%);
 }
 
-/* Animations */
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+.crm-debug-outline {
+  outline: 1px dashed rgba(37, 99, 235, 0.35);
 }
-
-.fade-in {
-  animation: fadeIn 0.3s ease-out;
-}
-
-/* Gradient backgrounds - оранжево-серые градиенты */
-.gradient-bg {
-  background: linear-gradient(135deg, #FF6B35 0%, #E64A19 100%);
-}
-
-.gradient-bg-secondary {
-  background: linear-gradient(135deg, #607D8B 0%, #455A64 100%);
-}
-
-.gradient-bg-success {
-  background: linear-gradient(135deg, #4CAF50 0%, #388E3C 100%);
-}
-
-.gradient-bg-warning {
-  background: linear-gradient(135deg, #FF9800 0%, #F57C00 100%);
-}
-
-/* Дополнительные стили для оранжево-серого дизайна */
-.orange-accent {
-  color: #FF6B35;
-}
-
-.gray-text {
-  color: #757575; /* Более светлый серый */
-}
-
-.light-text {
-  color: #9E9E9E; /* Очень светлый текст */
-}
-
-.orange-shadow {
-  box-shadow: 0 4px 12px rgba(255, 107, 53, 0.3);
-}
-
-.gray-border {
-  border: 1px solid rgba(96, 125, 139, 0.2);
-}
-
-/* Стили для более светлого текста */
-.light-heading {
-  color: #616161 !important;
-}
-
-.light-body {
-  color: #757575 !important;
-}
-
-.light-caption {
-  color: #9E9E9E !important;
-}
-

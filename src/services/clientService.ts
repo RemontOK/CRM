@@ -1,128 +1,136 @@
 import { Client } from '../types';
+import { apiService } from './api';
+import { normalizePhoneForCompare, normalizePhoneForStorage } from '../utils/phone';
 
 const CLIENT_STORAGE_KEY = 'crm_clients';
 
-// Получить всех клиентов
-export const getClients = (): Client[] => {
-  try {
-    const stored = localStorage.getItem(CLIENT_STORAGE_KEY);
-    return stored ? JSON.parse(stored) : [];
-  } catch (error) {
-    console.error('Ошибка при получении клиентов:', error);
-    return [];
-  }
-};
+const normalizeClient = (client: Client): Client => ({
+  ...client,
+  firstName: client.firstName || '',
+  lastName: client.lastName || '',
+  phone: normalizePhoneForStorage(client.phone || ''),
+  email: client.email || '',
+  address: client.address || '',
+  notes: client.notes || '',
+});
 
-// Сохранить клиента
-export const saveClient = (client: Client): Client => {
-  try {
-    const clients = getClients();
-    const existingClientIndex = clients.findIndex(c => c.id === client.id);
-    
-    if (existingClientIndex >= 0) {
-      // Обновить существующего клиента
-      clients[existingClientIndex] = client;
-    } else {
-      // Добавить нового клиента
-      clients.push(client);
+class ClientService {
+  private clients: Client[] = [];
+
+  constructor() {
+    this.loadFromCache();
+    void this.refreshFromApi();
+  }
+
+  private loadFromCache() {
+    const saved = localStorage.getItem(CLIENT_STORAGE_KEY);
+    if (!saved) {
+      this.clients = [];
+      return;
     }
-    
-    localStorage.setItem(CLIENT_STORAGE_KEY, JSON.stringify(clients));
-    return client;
-  } catch (error) {
-    console.error('Ошибка при сохранении клиента:', error);
-    throw error;
-  }
-};
 
-// Создать нового клиента
-export const createClient = (clientData: Partial<Client>): Client => {
-  const newClient: Client = {
-    id: Date.now().toString(),
-    firstName: clientData.firstName || '',
-    lastName: clientData.lastName || '',
-    phone: clientData.phone || '',
-    email: clientData.email || '',
-    address: clientData.address || '',
-    notes: clientData.notes || '',
-    totalOrders: 0,
-    totalSpent: 0,
-    lastOrderDate: null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-  
-  return saveClient(newClient);
-};
-
-// Найти клиента по телефону
-export const findClientByPhone = (phone: string): Client | null => {
-  const clients = getClients();
-  return clients.find(client => client.phone === phone) || null;
-};
-
-// Обновить клиента
-export const updateClient = (id: string, updates: Partial<Client>): Client | null => {
-  try {
-    const clients = getClients();
-    const clientIndex = clients.findIndex(c => c.id === id);
-    
-    if (clientIndex >= 0) {
-      clients[clientIndex] = {
-        ...clients[clientIndex],
-        ...updates,
-        updatedAt: new Date().toISOString(),
-      };
-      
-      localStorage.setItem(CLIENT_STORAGE_KEY, JSON.stringify(clients));
-      return clients[clientIndex];
+    try {
+      this.clients = JSON.parse(saved).map((client: Client) => normalizeClient(client));
+    } catch {
+      this.clients = [];
     }
-    
-    return null;
-  } catch (error) {
-    console.error('Ошибка при обновлении клиента:', error);
-    throw error;
   }
-};
 
-// Удалить клиента
-export const deleteClient = (id: string): boolean => {
-  try {
-    const clients = getClients();
-    const filteredClients = clients.filter(c => c.id !== id);
-    localStorage.setItem(CLIENT_STORAGE_KEY, JSON.stringify(filteredClients));
-    return true;
-  } catch (error) {
-    console.error('Ошибка при удалении клиента:', error);
-    return false;
+  private saveToCache() {
+    localStorage.setItem(CLIENT_STORAGE_KEY, JSON.stringify(this.clients));
   }
-};
 
-// Обновить статистику клиента при создании заказа
-export const updateClientStats = (clientId: string, orderAmount: number): void => {
-  try {
-    const clients = getClients();
-    const clientIndex = clients.findIndex(c => c.id === clientId);
-    
-    if (clientIndex >= 0) {
-      clients[clientIndex].totalOrders += 1;
-      clients[clientIndex].totalSpent += orderAmount;
-      clients[clientIndex].lastOrderDate = new Date().toISOString();
-      clients[clientIndex].updatedAt = new Date().toISOString();
-      
-      localStorage.setItem(CLIENT_STORAGE_KEY, JSON.stringify(clients));
+  async refreshFromApi() {
+    try {
+      const clients = await apiService.get<Client[]>('/clients');
+      this.clients = clients.map((client) => normalizeClient(client));
+      this.saveToCache();
+    } catch {
+      // keep cache if API unavailable
     }
-  } catch (error) {
-    console.error('Ошибка при обновлении статистики клиента:', error);
+    return [...this.clients];
   }
-};
 
-export const clientService = {
-  getClients,
-  saveClient,
-  createClient,
-  findClientByPhone,
-  updateClient,
-  deleteClient,
-  updateClientStats,
-};
+  getClients(): Client[] {
+    return [...this.clients];
+  }
+
+  findClientByPhone(phone: string): Client | null {
+    const normalizedPhone = normalizePhoneForCompare(phone);
+    return this.clients.find((client) => normalizePhoneForCompare(client.phone) === normalizedPhone) || null;
+  }
+
+  async createClient(clientData: Partial<Client>): Promise<Client> {
+    const payload = {
+      ...clientData,
+      firstName: clientData.firstName || '',
+      lastName: clientData.lastName || '',
+      phone: normalizePhoneForStorage(clientData.phone || ''),
+      email: clientData.email || '',
+      address: clientData.address || '',
+      notes: clientData.notes || '',
+      totalOrders: clientData.totalOrders ?? 0,
+      totalSpent: clientData.totalSpent ?? 0,
+      lastOrderDate: clientData.lastOrderDate ?? null,
+    };
+
+    const created = normalizeClient(await apiService.post<Client>('/clients', payload));
+    this.clients = [created, ...this.clients.filter((item) => item.id !== created.id)];
+    this.saveToCache();
+    return created;
+  }
+
+  async updateClient(id: string, updates: Partial<Client>): Promise<Client | null> {
+    try {
+      const updated = normalizeClient(
+        await apiService.put<Client>(`/clients/${id}`, {
+          ...updates,
+          ...(updates.phone !== undefined ? { phone: normalizePhoneForStorage(updates.phone) } : {}),
+        })
+      );
+      this.clients = this.clients.map((item) => (item.id === id ? updated : item));
+      this.saveToCache();
+      return updated;
+    } catch {
+      return null;
+    }
+  }
+
+  async saveClient(client: Client): Promise<Client> {
+    if (this.clients.some((item) => item.id === client.id)) {
+      const updated = await this.updateClient(client.id, client);
+      if (!updated) {
+        throw new Error('Не удалось обновить клиента');
+      }
+      return updated;
+    }
+
+    return this.createClient(client);
+  }
+
+  async deleteClient(id: string): Promise<boolean> {
+    try {
+      await apiService.delete(`/clients/${id}`);
+      this.clients = this.clients.filter((client) => client.id !== id);
+      this.saveToCache();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async updateClientStats(clientId: string, orderAmount: number): Promise<void> {
+    const client = this.clients.find((item) => item.id === clientId);
+    if (!client) {
+      return;
+    }
+
+    await this.updateClient(clientId, {
+      totalOrders: (client.totalOrders || 0) + 1,
+      totalSpent: (client.totalSpent || 0) + orderAmount,
+      lastOrderDate: new Date().toISOString(),
+    });
+  }
+}
+
+export const clientService = new ClientService();

@@ -20,6 +20,7 @@ const queryClient = new QueryClient({
   },
 });
 
+
 const root = ReactDOM.createRoot(
   document.getElementById('root') as HTMLElement
 );
@@ -27,7 +28,13 @@ const root = ReactDOM.createRoot(
 root.render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <BrowserRouter
+        basename={import.meta.env.BASE_URL}
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
         <ThemeProvider theme={theme}>
           <CssBaseline />
           <AuthProvider>

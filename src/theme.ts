@@ -1,122 +1,98 @@
-import { createTheme } from '@mui/material/styles';
+import { alpha, createTheme } from '@mui/material/styles';
+import { crmColors, crmGradients, crmRadius, crmShadow } from './styles/tokens';
 
 const theme = createTheme({
   palette: {
+    mode: 'light',
     primary: {
-      main: '#FF6B35', // Теплый оранжевый
-      light: '#FF8A65', // Светлый оранжевый
-      dark: '#E64A19', // Темный оранжевый
-      contrastText: '#fff',
+      main: crmColors.primary,
+      light: crmColors.primaryLight,
+      dark: crmColors.primaryDark,
+      contrastText: '#ffffff',
     },
     secondary: {
-      main: '#607D8B', // Серо-голубой
-      light: '#90A4AE', // Светло-серый
-      dark: '#455A64', // Темно-серый
-      contrastText: '#fff',
+      main: crmColors.secondary,
+      light: '#14b8a6',
+      dark: '#115e59',
+      contrastText: '#ffffff',
     },
     background: {
-      default: '#1A1A1A', // Темный фон
-      paper: '#FFFFFF',
+      default: crmColors.surface,
+      paper: crmColors.surfaceStrong,
     },
     text: {
-      primary: '#616161', // Более светлый серый для основного текста
-      secondary: '#9E9E9E', // Светло-серый для вторичного текста
+      primary: crmColors.ink,
+      secondary: crmColors.slate,
     },
     success: {
-      main: '#4CAF50',
-      light: '#81C784',
-      dark: '#388E3C',
+      main: crmColors.success,
     },
     warning: {
-      main: '#FF9800', // Оранжевый для предупреждений
-      light: '#FFB74D',
-      dark: '#F57C00',
+      main: crmColors.warning,
     },
     error: {
-      main: '#F44336',
-      light: '#EF5350',
-      dark: '#D32F2F',
+      main: crmColors.error,
     },
-    grey: {
-      50: '#FAFAFA',
-      100: '#F5F5F5',
-      200: '#EEEEEE',
-      300: '#E0E0E0',
-      400: '#BDBDBD',
-      500: '#9E9E9E',
-      600: '#757575',
-      700: '#616161', // Основной текст
-      800: '#757575', // Сделаем темные тона светлее
-      900: '#616161', // Самый темный тоже светлее
-    },
-  },
-  typography: {
-    fontFamily: '"Roboto", "Helvetica", "Arial", sans-serif',
-    h1: {
-      fontSize: '2.5rem',
-      fontWeight: 600,
-      lineHeight: 1.2,
-    },
-    h2: {
-      fontSize: '2rem',
-      fontWeight: 600,
-      lineHeight: 1.3,
-    },
-    h3: {
-      fontSize: '1.75rem',
-      fontWeight: 600,
-      lineHeight: 1.4,
-    },
-    h4: {
-      fontSize: '1.5rem',
-      fontWeight: 600,
-      lineHeight: 1.4,
-    },
-    h5: {
-      fontSize: '1.25rem',
-      fontWeight: 600,
-      lineHeight: 1.5,
-    },
-    h6: {
-      fontSize: '1rem',
-      fontWeight: 600,
-      lineHeight: 1.6,
-    },
-    body1: {
-      fontSize: '1rem',
-      lineHeight: 1.5,
-    },
-    body2: {
-      fontSize: '0.875rem',
-      lineHeight: 1.43,
+    info: {
+      main: crmColors.info,
     },
   },
   shape: {
-    borderRadius: 12,
+    borderRadius: 4,
+  },
+  typography: {
+    fontFamily: '"Manrope", "Segoe UI", sans-serif',
+    h1: { fontWeight: 800, letterSpacing: '-0.04em' },
+    h2: { fontWeight: 800, letterSpacing: '-0.03em' },
+    h3: { fontWeight: 800, letterSpacing: '-0.03em' },
+    h4: { fontWeight: 750, letterSpacing: '-0.02em' },
+    h5: { fontWeight: 750, letterSpacing: '-0.02em' },
+    h6: { fontWeight: 700 },
+    button: { fontWeight: 700 },
   },
   components: {
+    MuiCssBaseline: {
+      styleOverrides: {
+        ':root': {
+          '--crm-bg': crmColors.surface,
+          '--crm-panel': crmColors.surfaceStrong,
+          '--crm-border': crmColors.line,
+          '--crm-shadow': crmShadow.panel,
+          '--crm-shadow-soft': crmShadow.soft,
+          '--crm-radius-sm': `${crmRadius.sm}px`,
+          '--crm-radius-md': `${crmRadius.md}px`,
+          '--crm-radius-lg': `${crmRadius.lg}px`,
+          '--crm-radius-xl': `${crmRadius.xl}px`,
+          '--crm-color-primary': crmColors.primary,
+          '--crm-color-primary-light': crmColors.primaryLight,
+          '--crm-color-primary-dark': crmColors.primaryDark,
+          '--crm-color-ink': crmColors.ink,
+          '--crm-color-slate': crmColors.slate,
+          '--crm-color-line-strong': crmColors.lineStrong,
+          '--crm-color-success': crmColors.success,
+          '--crm-color-warning': crmColors.warning,
+          '--crm-color-error': crmColors.error,
+          '--crm-color-info': crmColors.info,
+        },
+        body: {
+          background: crmGradients.appBackground,
+        },
+      },
+    },
     MuiButton: {
+      defaultProps: {
+        disableElevation: true,
+      },
       styleOverrides: {
         root: {
+          borderRadius: crmRadius.md,
+          paddingInline: 18,
           textTransform: 'none',
-          borderRadius: 8,
-          padding: '8px 16px',
-          fontWeight: 500,
-          transition: 'all 0.3s ease',
         },
         contained: {
-          boxShadow: '0 2px 8px rgba(255, 107, 53, 0.3)',
+          boxShadow: crmShadow.focus,
           '&:hover': {
-            boxShadow: '0 4px 12px rgba(255, 107, 53, 0.4)',
-            transform: 'translateY(-1px)',
-          },
-        },
-        outlined: {
-          borderColor: '#FF6B35',
-          color: '#FF6B35',
-          '&:hover': {
-            backgroundColor: 'rgba(255, 107, 53, 0.08)',
-            borderColor: '#E64A19',
+            boxShadow: crmShadow.focusHover,
           },
         },
       },
@@ -124,72 +100,39 @@ const theme = createTheme({
     MuiCard: {
       styleOverrides: {
         root: {
-          boxShadow: '0 2px 12px rgba(0,0,0,0.08)',
-          borderRadius: 12,
-          border: '1px solid rgba(96, 125, 139, 0.1)',
-          transition: 'all 0.3s ease',
-          '&:hover': {
-            boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-            transform: 'translateY(-2px)',
-          },
-        },
-      },
-    },
-    MuiPaper: {
-      styleOverrides: {
-        root: {
+          borderRadius: crmRadius.lg,
+          border: `1px solid ${alpha(crmColors.ink, 0.08)}`,
+          boxShadow: crmShadow.panel,
           backgroundImage: 'none',
+          overflow: 'hidden',
         },
       },
     },
     MuiAppBar: {
       styleOverrides: {
         root: {
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-          backgroundColor: '#FF6B35',
+          backgroundImage: 'none',
+          backgroundColor: alpha('#ffffff', 0.9),
+          color: crmColors.ink,
+          backdropFilter: 'blur(18px)',
+          borderBottom: `1px solid ${alpha(crmColors.ink, 0.08)}`,
+          boxShadow: 'none',
+        },
+      },
+    },
+    MuiDrawer: {
+      styleOverrides: {
+        paper: {
+          backgroundColor: crmColors.sidebar,
+          color: '#e2e8f0',
+          borderRight: `1px solid ${alpha('#ffffff', 0.06)}`,
         },
       },
     },
     MuiChip: {
       styleOverrides: {
         root: {
-          backgroundColor: 'rgba(255, 107, 53, 0.1)',
-          color: '#E64A19',
-          border: '1px solid rgba(255, 107, 53, 0.2)',
-        },
-      },
-    },
-    MuiTypography: {
-      styleOverrides: {
-        root: {
-          color: '#616161', // Более светлый основной текст
-        },
-        h1: {
-          color: '#616161',
-        },
-        h2: {
-          color: '#616161',
-        },
-        h3: {
-          color: '#616161',
-        },
-        h4: {
-          color: '#616161',
-        },
-        h5: {
-          color: '#616161',
-        },
-        h6: {
-          color: '#616161',
-        },
-        body1: {
-          color: '#757575',
-        },
-        body2: {
-          color: '#9E9E9E',
-        },
-        caption: {
-          color: '#9E9E9E',
+          borderRadius: crmRadius.pill,
         },
       },
     },
@@ -197,13 +140,16 @@ const theme = createTheme({
       styleOverrides: {
         root: {
           '& .MuiOutlinedInput-root': {
-            '&:hover fieldset': {
-              borderColor: '#FF6B35',
-            },
-            '&.Mui-focused fieldset': {
-              borderColor: '#FF6B35',
-            },
+            borderRadius: crmRadius.sm,
+            backgroundColor: alpha('#ffffff', 0.88),
           },
+        },
+      },
+    },
+    MuiPaper: {
+      styleOverrides: {
+        rounded: {
+          borderRadius: crmRadius.lg,
         },
       },
     },
@@ -211,4 +157,3 @@ const theme = createTheme({
 });
 
 export default theme;
-

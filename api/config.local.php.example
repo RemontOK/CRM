@@ -1,0 +1,19 @@
+﻿<?php
+
+declare(strict_types=1);
+
+return [
+    'db' => [
+        'host' => 'localhost',
+        'port' => 3306,
+        'database' => 'cc060567_BD',
+        'username' => 'cc060567',
+        'password' => 'CHANGE_ME',
+        'charset' => 'utf8mb4',
+    ],
+    'app' => [
+        'base_path' => '/api',
+        'cors_origin' => 'https://nakcrm.ru',
+        'token_ttl_days' => 30,
+    ],
+];

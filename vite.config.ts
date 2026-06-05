@@ -1,17 +1,16 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+﻿import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
 
-// https://vitejs.dev/config/
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [react()],
-  base: '/CRM/',
+  base: '/',
   server: {
     port: 4000,
     open: true,
   },
   build: {
     outDir: 'build',
-    sourcemap: false, // Отключаем source map для уменьшения размера
+    sourcemap: false,
     rollupOptions: {
       output: {
         manualChunks: {
@@ -28,5 +27,4 @@ export default defineConfig({
       '@': '/src',
     },
   },
-})
-
+}));

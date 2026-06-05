@@ -1,0 +1,69 @@
+import React from 'react';
+import { Grid, FormControl, InputLabel, MenuItem, Select, TextField } from '@mui/material';
+import { PeriodFilterValue, PeriodPreset } from '../../utils/dateRange';
+
+interface PeriodFilterProps {
+  value: PeriodFilterValue;
+  onChange: (next: PeriodFilterValue) => void;
+  presetLabel?: string;
+}
+
+const PeriodFilter: React.FC<PeriodFilterProps> = ({ value, onChange, presetLabel = 'Период' }) => {
+  const handlePresetChange = (preset: PeriodPreset) => {
+    onChange({
+      preset,
+      from: preset === 'custom' ? value.from : '',
+      to: preset === 'custom' ? value.to : '',
+    });
+  };
+
+  return (
+    <>
+      <Grid item xs={12} md={2}>
+        <FormControl fullWidth>
+          <InputLabel>{presetLabel}</InputLabel>
+          <Select
+            value={value.preset}
+            label={presetLabel}
+            onChange={(event) => handlePresetChange(event.target.value as PeriodPreset)}
+          >
+            <MenuItem value="all">За всё время</MenuItem>
+            <MenuItem value="today">Сегодня</MenuItem>
+            <MenuItem value="week">7 дней</MenuItem>
+            <MenuItem value="month">Месяц</MenuItem>
+            <MenuItem value="quarter">Квартал</MenuItem>
+            <MenuItem value="year">Год</MenuItem>
+            <MenuItem value="custom">Свой период</MenuItem>
+          </Select>
+        </FormControl>
+      </Grid>
+
+      {value.preset === 'custom' && (
+        <>
+          <Grid item xs={12} md={2}>
+            <TextField
+              fullWidth
+              label="С даты"
+              type="date"
+              value={value.from}
+              onChange={(event) => onChange({ ...value, from: event.target.value })}
+              InputLabelProps={{ shrink: true }}
+            />
+          </Grid>
+          <Grid item xs={12} md={2}>
+            <TextField
+              fullWidth
+              label="По дату"
+              type="date"
+              value={value.to}
+              onChange={(event) => onChange({ ...value, to: event.target.value })}
+              InputLabelProps={{ shrink: true }}
+            />
+          </Grid>
+        </>
+      )}
+    </>
+  );
+};
+
+export default PeriodFilter;

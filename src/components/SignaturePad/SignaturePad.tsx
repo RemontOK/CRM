@@ -103,7 +103,7 @@ const SignaturePad: React.FC<SignaturePadProps> = ({
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>
+      <DialogTitle component="div">
         <Box display="flex" justifyContent="space-between" alignItems="center">
           <Typography variant="h6">
             Электронная подпись

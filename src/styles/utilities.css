@@ -1,0 +1,56 @@
+.crm-page-shell {
+  display: grid;
+  gap: 24px;
+}
+
+.crm-page-header {
+  display: grid;
+  gap: 4px;
+}
+
+.crm-page-eyebrow {
+  color: var(--crm-color-slate);
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.crm-page-title {
+  font-size: clamp(1.9rem, 3vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--crm-color-ink);
+}
+
+.crm-panel {
+  background: var(--crm-panel);
+  border: 1px solid var(--crm-border);
+  border-radius: var(--crm-radius-lg);
+  box-shadow: var(--crm-shadow);
+  overflow: hidden;
+}
+
+.crm-panel-pad {
+  padding: 24px;
+}
+
+.crm-toolbar {
+  background: var(--crm-panel);
+  border: 1px solid var(--crm-border);
+  border-radius: var(--crm-radius-lg);
+  box-shadow: var(--crm-shadow);
+  padding: 20px 24px;
+}
+
+.crm-stat-card {
+  background: var(--crm-panel);
+  border: 1px solid var(--crm-border);
+  border-radius: var(--crm-radius-lg);
+  box-shadow: var(--crm-shadow);
+  padding: 24px;
+}
+
+.crm-muted {
+  color: var(--crm-color-slate);
+}

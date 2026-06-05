@@ -1,29 +1,23 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Box,
   Button,
   Dialog,
-  DialogTitle,
-  DialogContent,
   DialogActions,
-  Typography,
-  Grid,
-  Paper,
-  Divider,
+  DialogContent,
   IconButton,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
+  Stack,
+  Typography,
 } from '@mui/material';
-import {
-  Print,
-  Close,
-} from '@mui/icons-material';
+import { Close, Download, Draw, Print } from '@mui/icons-material';
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
+import QRCode from 'qrcode';
 import toast from 'react-hot-toast';
-import { AcceptanceAct, WorkCompletionAct, WorkItem, PartItem } from '../../types';
+import { AcceptanceAct, PartItem, WorkCompletionAct, WorkItem } from '../../types';
+import { appSettingsService } from '../../services/appSettingsService';
+import { documentService } from '../../services/documentService';
+import { formatPhone } from '../../utils/phone';
 import SignaturePad from '../SignaturePad/SignaturePad';
 
 interface DocumentGeneratorProps {
@@ -34,710 +28,741 @@ interface DocumentGeneratorProps {
   onSign?: (signatureData: string, signerRole: 'client' | 'master') => void;
 }
 
+const company = {
+  title: 'Исполнитель NK Service',
+  owner: 'ИП Неклюдов А. А.',
+  inn: '263221164126',
+  ogrnip: '324265100105224',
+  phone: '+7 (938) 309 18-77',
+  scheduleAcceptance: 'Ежедневно с 10:00 - 19:00',
+  scheduleCompletion: 'Пн - Сб с 10:00 - 19:00, Вс с 12:00 - 19:00',
+};
+
+const pageSx = {
+  width: '210mm',
+  minHeight: '296mm',
+  mx: 'auto',
+  bgcolor: '#fff',
+  color: '#000',
+  p: '14mm 16mm 18mm',
+  boxSizing: 'border-box',
+  fontFamily: 'Arial, sans-serif',
+};
+
+const tableSx = {
+  width: '100%',
+  borderCollapse: 'collapse',
+  tableLayout: 'fixed' as const,
+};
+
+const cellSx = {
+  border: '1px solid #8da0a6',
+  p: 1.2,
+  verticalAlign: 'top',
+  fontSize: '12px',
+  lineHeight: 1.35,
+};
+
+const headerCellSx = {
+  ...cellSx,
+  textAlign: 'center',
+  fontWeight: 700,
+  fontSize: '14px',
+};
+
+const formatDate = (value?: string | Date) => {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString('ru-RU');
+};
+
+const formatMoney = (value?: number) => String(Number(value || 0)).replace(/(\d)(?=(\d{3})+$)/g, '$1 ');
+
+const displayValue = (value?: string | number | null) => {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+};
+
+const escapeHtml = (value?: string | number | null) =>
+  String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+
+const fallbackDocumentTitle = (value: string | undefined, fallback: string) =>
+  value && !/\?{2,}/.test(value) ? value : fallback;
+
+const splitName = (fullName: string) => {
+  const parts = fullName.trim().split(/\s+/);
+  return {
+    firstName: parts[0] || '',
+    lastName: parts.slice(1).join(' ') || '',
+  };
+};
+
+const renderWorksHtml = (works: WorkItem[], warrantyDays = 0) => {
+  if (!works.length) {
+    return '';
+  }
+
+  const baseCellStyle = 'border:1px solid #8da0a6; padding:6px 4px; vertical-align:middle; font-size:11px; line-height:1.2;';
+  const centerCellStyle = `${baseCellStyle} text-align:center;`;
+  const rightCellStyle = `${baseCellStyle} text-align:right;`;
+
+  return works
+    .map(
+      (work, index) => {
+        const rowWarrantyDays = Number(work.warrantyDays ?? warrantyDays) || 0;
+        return `<tr><td style="${centerCellStyle}">${index + 1}</td><td style="${baseCellStyle}">${escapeHtml(work.name)}</td><td style="${centerCellStyle}">${rowWarrantyDays}</td><td style="${rightCellStyle}">${formatMoney(
+          work.cost
+        )}</td><td style="${centerCellStyle}">${work.quantity}</td><td style="${rightCellStyle}">${formatMoney(work.totalCost)}</td></tr>`;
+      }
+    )
+    .join('');
+};
+
+const renderPartsHtml = (parts: PartItem[]) => {
+  if (!parts.length) {
+    return '';
+  }
+
+  return parts
+    .map(
+      (part, index) =>
+        `<tr><td>${index + 1}</td><td>${escapeHtml(part.name)}</td><td>${part.quantity}</td><td>${formatMoney(
+          part.unitPrice
+        )}</td><td>${formatMoney(part.totalPrice)}</td></tr>`
+    )
+    .join('');
+};
+
+const signatureLabelSx = {
+  textAlign: 'center',
+  fontSize: '11px',
+  mt: 0.7,
+};
+
+const lineBlockSx = {
+  borderBottom: '1px solid #000',
+  minHeight: '34px',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  pb: 0.4,
+};
+
+const InfoLine: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
+  <Box sx={{ py: 0.9, borderBottom: '1px solid #d8e0e4' }}>
+    <Box sx={{ fontWeight: 700, mb: 0.35 }}>{label}</Box>
+    <Box>{value || ''}</Box>
+  </Box>
+);
+
 const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
   open,
   onClose,
-  document,
+  document: currentDocument,
   documentType,
   onSign,
 }) => {
   const [isSignatureDialogOpen, setIsSignatureDialogOpen] = useState(false);
   const [currentSignerRole, setCurrentSignerRole] = useState<'client' | 'master'>('client');
-  const [isPrinting, setIsPrinting] = useState(false);
+  const [isBusy, setIsBusy] = useState(false);
+  const [qrCodeUrl, setQrCodeUrl] = useState('');
 
-  if (!document) return null;
+  useEffect(() => {
+    if (!currentDocument) {
+      setQrCodeUrl('');
+      return;
+    }
 
-  const handleSign = (signerRole: 'client' | 'master') => {
-    setCurrentSignerRole(signerRole);
+    const qrPayload =
+      documentType === 'acceptance'
+        ? `Статус заказа ${currentDocument.orderNumber}`
+        : `Отзыв по заказу ${currentDocument.orderNumber}`;
+
+    QRCode.toDataURL(qrPayload, {
+      width: 132,
+      margin: 1,
+      color: { dark: '#000000', light: '#ffffff' },
+    })
+      .then(setQrCodeUrl)
+      .catch(() => setQrCodeUrl(''));
+  }, [currentDocument, documentType]);
+
+  if (!currentDocument) {
+    return null;
+  }
+
+  const appSettings = appSettingsService.getSettings();
+  const activeTemplate = appSettings.documents.templates.find(
+    (template) => template.type === documentType && template.isActive
+  );
+
+  const companyInfo = {
+    companyName: appSettings.business.companyName || 'NK Service',
+    companyPhone: formatPhone(appSettings.business.phone || company.phone),
+    companyEmail: appSettings.business.email || '',
+    companyAddress: appSettings.business.address || '',
+    workingHours: appSettings.business.workingHours || '',
+  };
+
+  const openSignatureDialog = (role: 'client' | 'master') => {
+    setCurrentSignerRole(role);
     setIsSignatureDialogOpen(true);
   };
 
   const handleSignatureSave = (signatureData: string) => {
-    if (onSign) {
-      onSign(signatureData, currentSignerRole);
-    }
+    onSign?.(signatureData, currentSignerRole);
     setIsSignatureDialogOpen(false);
   };
 
-  const handlePrint = () => {
-    setIsPrinting(true);
+  const buildAcceptanceTemplateHtml = (act: AcceptanceAct) => {
+    if (!activeTemplate?.template) {
+      return '';
+    }
+
+    const clientName = `${act.client.firstName} ${act.client.lastName}`.trim();
+    const deviceName = [act.device.brand, act.device.model].filter(Boolean).join(' ').trim();
+
+    return activeTemplate.template
+      .replaceAll(
+        '{{documentTitle}}',
+        escapeHtml(
+          fallbackDocumentTitle(
+            appSettings.documents.acceptanceActTitle || activeTemplate.name,
+            'Акт приема-передачи'
+          )
+        )
+      )
+      .replaceAll('{{companyName}}', escapeHtml(companyInfo.companyName))
+      .replaceAll('{{companyPhone}}', escapeHtml(companyInfo.companyPhone))
+      .replaceAll('{{companyEmail}}', escapeHtml(companyInfo.companyEmail))
+      .replaceAll('{{companyAddress}}', escapeHtml(companyInfo.companyAddress))
+      .replaceAll('{{workingHours}}', escapeHtml(companyInfo.workingHours))
+      .replaceAll('{{orderNumber}}', escapeHtml(act.orderNumber))
+      .replaceAll('{{orderStatus}}', '')
+      .replaceAll('{{priority}}', '')
+      .replaceAll('{{clientName}}', escapeHtml(clientName))
+      .replaceAll('{{clientPhone}}', escapeHtml(formatPhone(act.client.phone)))
+      .replaceAll('{{clientEmail}}', escapeHtml(act.client.email || ''))
+      .replaceAll('{{clientAddress}}', escapeHtml(act.client.address || ''))
+      .replaceAll('{{device}}', escapeHtml(deviceName))
+      .replaceAll('{{deviceBrand}}', escapeHtml(act.device.brand))
+      .replaceAll('{{deviceModel}}', escapeHtml(act.device.model))
+      .replaceAll('{{color}}', escapeHtml(act.device.color || ''))
+      .replaceAll('{{serialNumber}}', escapeHtml(act.device.serialNumber || ''))
+      .replaceAll('{{imei}}', escapeHtml(act.device.imei || ''))
+      .replaceAll('{{password}}', '')
+      .replaceAll('{{completeness}}', escapeHtml(act.client.address || ''))
+      .replaceAll('{{appearance}}', escapeHtml(act.device.externalCondition || ''))
+      .replaceAll('{{problemDescription}}', escapeHtml(act.problemDescription))
+      .replaceAll('{{diagnosis}}', '')
+      .replaceAll('{{estimatedCost}}', act.preliminaryCost ? formatMoney(act.preliminaryCost) : '')
+      .replaceAll('{{totalCost}}', '')
+      .replaceAll('{{advancePayment}}', act.advancePayment ? formatMoney(act.advancePayment) : '')
+      .replaceAll('{{discount}}', '')
+      .replaceAll('{{paymentMethod}}', '')
+      .replaceAll('{{debt}}', '')
+      .replaceAll('{{works}}', '')
+      .replaceAll('{{worksTableRows}}', '')
+      .replaceAll('{{parts}}', '')
+      .replaceAll('{{technician}}', escapeHtml(act.acceptedBy))
+      .replaceAll('{{intakeManager}}', escapeHtml(act.acceptedBy))
+      .replaceAll('{{deliveryManager}}', '')
+      .replaceAll('{{date}}', escapeHtml(formatDate(act.acceptanceDate)))
+      .replaceAll('{{acceptedAt}}', escapeHtml(formatDate(act.acceptanceDate)))
+      .replaceAll('{{createdAt}}', escapeHtml(formatDate(act.createdAt)))
+      .replaceAll('{{completedAt}}', '')
+      .replaceAll('{{warrantyText}}', escapeHtml(appSettings.documents.warrantyText))
+      .replaceAll('{{footerDisclaimer}}', escapeHtml(appSettings.documents.footerDisclaimer))
+      .replaceAll('{{notes}}', escapeHtml(act.client.notes || ''))
+      .replaceAll('{{recommendations}}', escapeHtml(act.conditions || ''));
+  };
+
+  const buildCompletionTemplateHtml = (act: WorkCompletionAct) => {
+    if (!activeTemplate?.template) {
+      return '';
+    }
+
+    const clientName = `${act.client.firstName} ${act.client.lastName}`.trim();
+    const deviceName = [act.device.brand, act.device.model].filter(Boolean).join(' ').trim();
+    const worksText = act.worksPerformed.map((item) => item.name).join(', ');
+    const partsText = act.partsUsed.map((item) => item.name).join(', ');
+
+    return activeTemplate.template
+      .replaceAll(
+        '{{documentTitle}}',
+        escapeHtml(
+          fallbackDocumentTitle(
+            appSettings.documents.completionActTitle || activeTemplate.name,
+            'Акт выполненных работ'
+          )
+        )
+      )
+      .replaceAll('{{companyName}}', escapeHtml(companyInfo.companyName))
+      .replaceAll('{{companyPhone}}', escapeHtml(companyInfo.companyPhone))
+      .replaceAll('{{companyEmail}}', escapeHtml(companyInfo.companyEmail))
+      .replaceAll('{{companyAddress}}', escapeHtml(companyInfo.companyAddress))
+      .replaceAll('{{workingHours}}', escapeHtml(companyInfo.workingHours))
+      .replaceAll('{{orderNumber}}', escapeHtml(act.orderNumber))
+      .replaceAll('{{orderStatus}}', '')
+      .replaceAll('{{priority}}', '')
+      .replaceAll('{{clientName}}', escapeHtml(clientName))
+      .replaceAll('{{clientPhone}}', escapeHtml(formatPhone(act.client.phone)))
+      .replaceAll('{{clientEmail}}', escapeHtml(act.client.email || ''))
+      .replaceAll('{{clientAddress}}', escapeHtml(act.client.address || ''))
+      .replaceAll('{{device}}', escapeHtml(deviceName))
+      .replaceAll('{{deviceBrand}}', escapeHtml(act.device.brand))
+      .replaceAll('{{deviceModel}}', escapeHtml(act.device.model))
+      .replaceAll('{{color}}', escapeHtml(act.device.color || ''))
+      .replaceAll('{{serialNumber}}', escapeHtml(act.device.serialNumber || ''))
+      .replaceAll('{{imei}}', escapeHtml(act.device.imei || ''))
+      .replaceAll('{{password}}', '')
+      .replaceAll('{{completeness}}', escapeHtml(act.client.address || ''))
+      .replaceAll('{{appearance}}', escapeHtml(act.device.externalCondition || ''))
+      .replaceAll('{{problemDescription}}', escapeHtml(worksText))
+      .replaceAll('{{diagnosis}}', '')
+      .replaceAll('{{estimatedCost}}', '')
+      .replaceAll('{{totalCost}}', formatMoney(act.totalCost))
+      .replaceAll('{{advancePayment}}', '')
+      .replaceAll('{{discount}}', '0')
+      .replaceAll('{{paymentMethod}}', '')
+      .replaceAll('{{debt}}', '')
+      .replaceAll('{{works}}', escapeHtml(worksText))
+      .replaceAll('{{worksTableRows}}', renderWorksHtml(act.worksPerformed, act.warrantyPeriod))
+      .replaceAll('{{parts}}', escapeHtml(partsText))
+      .replaceAll('{{technician}}', escapeHtml(act.completedBy))
+      .replaceAll('{{intakeManager}}', '')
+      .replaceAll('{{deliveryManager}}', escapeHtml(act.completedBy))
+      .replaceAll('{{date}}', escapeHtml(formatDate(act.completionDate)))
+      .replaceAll('{{createdAt}}', escapeHtml(formatDate(act.createdAt)))
+      .replaceAll('{{completedAt}}', escapeHtml(formatDate(act.completionDate)))
+      .replaceAll('{{warrantyText}}', escapeHtml(appSettings.documents.warrantyText))
+      .replaceAll('{{footerDisclaimer}}', escapeHtml(appSettings.documents.footerDisclaimer))
+      .replaceAll('{{notes}}', escapeHtml(act.client.notes || ''))
+      .replaceAll('{{recommendations}}', '');
+  };
+
+  const buildPdf = async () => {
+    const element = window.document.getElementById('document-content');
+    if (!element) {
+      throw new Error('Шаблон документа не найден');
+    }
+
+    const canvas = await html2canvas(element, {
+      scale: 2,
+      useCORS: true,
+      backgroundColor: '#ffffff',
+      logging: false,
+    });
+
+    const pdf = new jsPDF('p', 'mm', 'a4');
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const imgWidth = pageWidth;
+    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+    const imgData = canvas.toDataURL('image/png');
+    const overflowTolerance = 3;
+
+    if (imgHeight <= pageHeight + overflowTolerance) {
+      pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, Math.min(imgHeight, pageHeight));
+      return pdf;
+    }
+
+    let heightLeft = imgHeight;
+    let position = 0;
+
+    pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+    heightLeft -= pageHeight;
+
+    while (heightLeft > overflowTolerance) {
+      position = heightLeft - imgHeight;
+      pdf.addPage();
+      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+    }
+
+    return pdf;
+  };
+
+  const markPrinted = async () => {
+    await documentService.markDocumentAsPrinted(currentDocument.id, documentType);
+  };
+
+  const handleDownloadPdf = async () => {
+    setIsBusy(true);
     try {
-      window.print();
-      // Убираем уведомление, так как оно мешает просмотру PDF
-      // toast.success('Документ отправлен на печать');
+      const pdf = await buildPdf();
+      pdf.save(`${documentType === 'acceptance' ? 'acceptance' : 'completion'}-${currentDocument.orderNumber.replace('#', '')}.pdf`);
+      await markPrinted();
+      toast.success('PDF сохранен');
     } catch (error) {
-      console.error('Ошибка при печати:', error);
-      toast.error('Ошибка при печати');
+      console.error(error);
+      toast.error('Не удалось сохранить PDF');
     } finally {
-      setIsPrinting(false);
+      setIsBusy(false);
     }
   };
 
-  const renderAcceptanceAct = (act: AcceptanceAct) => (
-    <Box id="document-content" sx={{ 
-      p: 3, 
-      maxWidth: 800, 
-      mx: 'auto',
-      fontFamily: 'Arial, sans-serif',
-      fontSize: '14px',
-      lineHeight: 1.4,
-      '@media print': {
-        maxWidth: 'none',
-        margin: 0,
-        padding: '10mm',
-        fontSize: '11px',
-        width: '100%',
-        height: '100vh',
-        boxSizing: 'border-box',
+  const handlePrintPdf = async () => {
+    setIsBusy(true);
+    try {
+      const pdf = await buildPdf();
+      pdf.autoPrint();
+      const pdfBlob = pdf.output('blob');
+      const pdfUrl = URL.createObjectURL(pdfBlob);
+      const popup = window.open(pdfUrl, '_blank', 'noopener,noreferrer');
+      if (!popup) {
+        URL.revokeObjectURL(pdfUrl);
+        throw new Error('Окно печати заблокировано браузером');
       }
-    }}>
-      {/* Заголовок документа */}
-      <Box textAlign="center" sx={{ mb: 3 }}>
-        <Typography variant="h4" fontWeight="bold" sx={{ fontSize: '24px', mb: 1 }}>
-          АКТ ПРИЕМА-ПЕРЕДАЧИ УСТРОЙСТВА В РЕМОНТ
-        </Typography>
-        <Typography variant="h6" sx={{ fontSize: '16px', mb: 1 }}>
-          №{act.documentNumber}
-        </Typography>
-        <Typography variant="body1" sx={{ fontSize: '14px' }}>
-          от {act.acceptanceDate.toLocaleDateString('ru-RU')}
-        </Typography>
+      window.setTimeout(() => URL.revokeObjectURL(pdfUrl), 60000);
+      await markPrinted();
+      toast.success('PDF подготовлен к печати');
+    } catch (error) {
+      console.error(error);
+      toast.error('Не удалось открыть PDF для печати');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const renderTop = (title: string, subtitle: string, date: string, schedule: string) => (
+    <Box sx={{ display: 'grid', gridTemplateColumns: '140px 1fr 220px', alignItems: 'start', gap: 2.2, mb: 3.2 }}>
+      <Box sx={{ textAlign: 'center' }}>
+        {qrCodeUrl ? (
+          <Box component="img" src={qrCodeUrl} alt="QR" sx={{ width: 118, height: 118, display: 'block', mx: 'auto', mb: 0.8 }} />
+        ) : (
+          <Box sx={{ width: 118, height: 118, mx: 'auto', mb: 0.8, border: '1px solid #000' }} />
+        )}
+        <Typography sx={{ fontSize: '8px' }}>{subtitle}</Typography>
       </Box>
 
-      {/* Информация о сервисном центре */}
-      <Box sx={{ 
-        display: 'flex', 
-        justifyContent: 'flex-end',
-        mb: 3,
-        '@media print': {
-          justifyContent: 'flex-end',
-        }
-      }}>
-        {/* Информация о сервисном центре */}
-        <Box sx={{ textAlign: 'right', minWidth: '300px' }}>
-          <Typography variant="body1" fontWeight="bold" sx={{ fontSize: '14px', mb: 0.5 }}>
-            Исполнитель NK Service
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '12px', mb: 0.5 }}>
-            ИП Неклюдов А.А.
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '12px', mb: 0.5 }}>
-            ИНН: 263221164126
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '12px', mb: 0.5 }}>
-            ОГРНИП: 324265100105224
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '12px', mb: 0.5 }}>
-            Тел. +7 (938) 309 18-77
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '12px' }}>
-            Ежедневно С 10:00 - 19:00
-          </Typography>
-        </Box>
+      <Box sx={{ textAlign: 'center', pt: 0.5 }}>
+        <Typography sx={{ fontSize: '18px', fontWeight: 700, mb: 0.4 }}>{title}</Typography>
+        {documentType === 'acceptance' && (
+          <Typography sx={{ fontSize: '13px', mb: 1.5 }}>устройства в ремонт</Typography>
+        )}
+        <Typography sx={{ fontSize: '17px', fontWeight: 500, mb: 1.2 }}>№{currentDocument.orderNumber.replace('#', '')}</Typography>
+        <Typography sx={{ fontSize: '14px' }}>{date}</Typography>
       </Box>
 
-      {/* Основная таблица */}
-      <TableContainer component={Paper} sx={{ mb: 3, border: '1px solid #000' }}>
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell sx={{ 
-                border: '1px solid #000', 
-                fontWeight: 'bold', 
-                textAlign: 'center',
-                fontSize: '12px',
-                width: '33%'
-              }}>
-                Клиент
-              </TableCell>
-              <TableCell sx={{ 
-                border: '1px solid #000', 
-                fontWeight: 'bold', 
-                textAlign: 'center',
-                fontSize: '12px',
-                width: '33%'
-              }}>
-                Устройство
-              </TableCell>
-              <TableCell sx={{ 
-                border: '1px solid #000', 
-                fontWeight: 'bold', 
-                textAlign: 'center',
-                fontSize: '12px',
-                width: '33%'
-              }}>
-                Ремонт
-              </TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            <TableRow>
-              {/* Колонка Клиент */}
-              <TableCell sx={{ border: '1px solid #000', fontSize: '12px', verticalAlign: 'top' }}>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    ФИО Клиента:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.client.firstName} {act.client.lastName}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Номер телефона клиента:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.client.phone}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Комплектация:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    Отсутствует
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Заметки:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    Устройство у клиента
-                  </Typography>
-                </Box>
-                <Box>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Рекомендации:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    -
-                  </Typography>
-                </Box>
-              </TableCell>
-
-              {/* Колонка Устройство */}
-              <TableCell sx={{ border: '1px solid #000', fontSize: '12px', verticalAlign: 'top' }}>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Устройство:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.device.brand} {act.device.model}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Пароль:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    -
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Цвет:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.device.color || 'Черный'}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    IMEI:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.device.imei || '-'}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    S/N:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.device.serialNumber || '-'}
-                  </Typography>
-                </Box>
-                <Box>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Внешний вид устройства:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.device.externalCondition || 'Потертости, Царапины'}
-                  </Typography>
-                </Box>
-              </TableCell>
-
-              {/* Колонка Ремонт */}
-              <TableCell sx={{ border: '1px solid #000', fontSize: '12px', verticalAlign: 'top' }}>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Ориентировочная стоимость:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.preliminaryCost}+{Math.round(act.preliminaryCost * 0.1)}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Аванс:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {Math.round(act.preliminaryCost * 0.3)}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Ориентировочный срок ремонта:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toLocaleDateString('ru-RU')}
-                  </Typography>
-                </Box>
-                <Box>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Заявленные неисправности:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.problemDescription}
-                  </Typography>
-                </Box>
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-      </TableContainer>
-
-      {/* Условия */}
-      <Box sx={{ mb: 3 }}>
-        <Typography variant="body2" sx={{ fontSize: '11px', mb: 2, fontWeight: 'bold' }}>
-          Условия:
-        </Typography>
-        <Box sx={{ fontSize: '10px', lineHeight: 1.3 }}>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 1 }}>
-            1. Подписанием настоящего акта приема-передачи устройства клиент подтверждает, что ознакомлен и согласен с правилами и условиями проведения ремонтных работ, изложенными в публичной оферте сервисного центра, являющейся неотъемлемой частью настоящего договора.
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 1 }}>
-            2. Установленные узлы или расходные материалы возврату не подлежат, согласно Перечню сложнотехнических товаров, не подлежащих обмену или возврату.
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 1 }}>
-            3. Клиент согласен с тем, что гарантия производителя аннулируется после ремонта.
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 1 }}>
-            4. Исполнитель не несет ответственности за возможную потерю информации на внутренних накопителях устройства, связанную с заменой узлов и компонентов.
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 1 }}>
-            5. Исполнитель не несет ответственности за целостность гарантийных пломб сторонних сервисных центров и производителя устройства.
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 1 }}>
-            6. Клиент принимает на себя риск, связанный с возможным проявлением при ремонте скрытых дефектов, присутствующих в устройстве на момент приема от клиента, которые не могут быть проверены и зафиксированы в настоящем документе (наличие следов коррозии, попадание влаги, инородные предметы, следы механических повреждений и другие непредусмотренные производителем вмешательства в устройство и его компоненты).
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 1 }}>
-            7. Ремонт и обслуживание проводятся в соответствии с требованиями нормативных документов, включая ГОСТ 12.2006-87 п.п. 9.1, ГОСТ Р 50377-92 п.п. 2.1.4, ГОСТ Р 50936-96, ГОСТ Р 50938-96 и согласно Федеральному закону "О защите прав потребителей".
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 1 }}>
-            8. Устройство клиента принимается без разборки и выявления внутренних неисправностей.
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 1 }}>
-            9. Клиент согласен с тем, что при ремонте устройства могут быть заменены компоненты, узлы, модули, влияющие на идентификацию IMEI номера устройства.
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 1 }}>
-            10. Факт возврата устройства из ремонта фиксируется в форме БО-17, которую Исполнитель заполняет в двух экземплярах при возврате владельцу устройства.
-          </Typography>
-        </Box>
-      </Box>
-
-      {/* Подписи */}
-      <Box sx={{ 
-        display: 'flex', 
-        justifyContent: 'space-between', 
-        alignItems: 'flex-end',
-        mt: 4,
-        '@media print': {
-          marginTop: '30px',
-        }
-      }}>
-        <Box sx={{ flex: 1, mr: 2 }}>
-          <Typography variant="body2" sx={{ fontSize: '11px', mb: 1 }}>
-            С условиями ознакомлен и согласен, устройство в указанном состоянии и работоспособности передал:
-          </Typography>
-          <Box sx={{ 
-            height: 40, 
-            borderBottom: '1px solid #000', 
-            mb: 1,
-            '@media print': {
-              height: '50px',
-            }
-          }}>
-            {/* Место для подписи клиента */}
-          </Box>
-          <Typography variant="caption" sx={{ fontSize: '10px', textAlign: 'center', display: 'block' }}>
-            Подпись клиента
-          </Typography>
-        </Box>
-
-        <Box sx={{ flex: 1, ml: 2 }}>
-          <Typography variant="body2" sx={{ fontSize: '11px', mb: 1 }}>
-            Устройство в указанном состоянии и работоспособности принял:
-          </Typography>
-          <Box sx={{ 
-            height: 40, 
-            borderBottom: '1px solid #000', 
-            mb: 1,
-            '@media print': {
-              height: '50px',
-            }
-          }}>
-            {/* Место для подписи мастера */}
-          </Box>
-          <Typography variant="caption" sx={{ fontSize: '10px', textAlign: 'center', display: 'block' }}>
-            Подпись исполнителя
-          </Typography>
-        </Box>
+      <Box sx={{ fontSize: '12px', lineHeight: 1.55 }}>
+        <Typography sx={{ fontSize: '12px', fontWeight: 700, mb: 0.6 }}>{company.title}</Typography>
+        <Typography sx={{ fontSize: '12px' }}>{company.owner}</Typography>
+        <Typography sx={{ fontSize: '12px' }}>ИНН: {company.inn}</Typography>
+        <Typography sx={{ fontSize: '12px' }}>ОГРНИП: {company.ogrnip}</Typography>
+        <Typography sx={{ fontSize: '12px' }}>Тел. {company.phone}</Typography>
+        <Typography sx={{ fontSize: '12px' }}>{schedule}</Typography>
       </Box>
     </Box>
   );
 
-  const renderWorkCompletionAct = (act: WorkCompletionAct) => (
-    <Box id="document-content" sx={{ 
-      p: 3, 
-      maxWidth: 800, 
-      mx: 'auto',
-      fontFamily: 'Arial, sans-serif',
-      fontSize: '14px',
-      lineHeight: 1.4,
-      '@media print': {
-        maxWidth: 'none',
-        margin: 0,
-        padding: '10mm',
-        fontSize: '11px',
-        width: '100%',
-        height: '100vh',
-        boxSizing: 'border-box',
-      }
-    }}>
-      {/* Заголовок документа */}
-      <Box textAlign="center" sx={{ mb: 3 }}>
-        <Typography variant="h4" fontWeight="bold" sx={{ fontSize: '24px', mb: 1 }}>
-          АКТ ВЫПОЛНЕННЫХ РАБОТ
-        </Typography>
-        <Typography variant="h6" sx={{ fontSize: '16px', mb: 1 }}>
-          №{act.documentNumber}
-        </Typography>
-        <Typography variant="body1" sx={{ fontSize: '14px' }}>
-          от {act.completionDate.toLocaleDateString('ru-RU')}
-        </Typography>
-      </Box>
-
-      {/* Информация о сервисном центре */}
-      <Box sx={{ 
-        display: 'flex', 
-        justifyContent: 'flex-end',
-        mb: 3,
-        '@media print': {
-          justifyContent: 'flex-end',
-        }
-      }}>
-        {/* Информация о сервисном центре */}
-        <Box sx={{ textAlign: 'right', minWidth: '300px' }}>
-          <Typography variant="body1" fontWeight="bold" sx={{ fontSize: '14px', mb: 0.5 }}>
-            Исполнитель NK Service
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '12px', mb: 0.5 }}>
-            ИП Неклюдов А.А.
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '12px', mb: 0.5 }}>
-            ИНН: 263221164126
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '12px', mb: 0.5 }}>
-            ОГРНИП: 324265100105224
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '12px', mb: 0.5 }}>
-            Тел. +7 (938) 309 18-77
-          </Typography>
-          <Typography variant="body2" sx={{ fontSize: '12px' }}>
-            Пн - Сб с 10:00 - 19:00, Вс с 12:00 - 19:00
-          </Typography>
-        </Box>
-      </Box>
-
-      {/* Основная таблица */}
-      <TableContainer component={Paper} sx={{ mb: 3, border: '1px solid #000' }}>
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell sx={{ 
-                border: '1px solid #000', 
-                fontWeight: 'bold', 
-                textAlign: 'center',
-                fontSize: '12px',
-                width: '33%'
-              }}>
-                Клиент
-              </TableCell>
-              <TableCell sx={{ 
-                border: '1px solid #000', 
-                fontWeight: 'bold', 
-                textAlign: 'center',
-                fontSize: '12px',
-                width: '33%'
-              }}>
-                Устройство
-              </TableCell>
-              <TableCell sx={{ 
-                border: '1px solid #000', 
-                fontWeight: 'bold', 
-                textAlign: 'center',
-                fontSize: '12px',
-                width: '33%'
-              }}>
-                Ремонт
-              </TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            <TableRow>
-              {/* Колонка Клиент */}
-              <TableCell sx={{ border: '1px solid #000', fontSize: '12px', verticalAlign: 'top' }}>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    ФИО Клиента:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.client.firstName} {act.client.lastName}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Номер телефона клиента:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.client.phone}
-                  </Typography>
-                </Box>
-              </TableCell>
-
-              {/* Колонка Устройство */}
-              <TableCell sx={{ border: '1px solid #000', fontSize: '12px', verticalAlign: 'top' }}>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Устройство:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.device.brand} {act.device.model}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Пароль:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    -
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Цвет:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.device.color || 'Черный'}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    IMEI:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.device.imei || '-'}
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Комплектация:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    Отсутствует
-                  </Typography>
-                </Box>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    S/N:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.device.serialNumber || '-'}
-                  </Typography>
-                </Box>
-                <Box>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Рекомендации:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    Внешний вид устройства: {act.device.externalCondition || 'Потертости, Царапины'}
-                  </Typography>
-                </Box>
-              </TableCell>
-
-              {/* Колонка Ремонт */}
-              <TableCell sx={{ border: '1px solid #000', fontSize: '12px', verticalAlign: 'top' }}>
-                <Box sx={{ mb: 1 }}>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Аванс:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {Math.round(act.totalCost * 0.3)}
-                  </Typography>
-                </Box>
-                <Box>
-                  <Typography variant="body2" sx={{ fontSize: '11px', fontWeight: 'bold' }}>
-                    Заявленные неисправности:
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontSize: '11px' }}>
-                    {act.worksPerformed.map(work => work.name).join(', ')}
-                  </Typography>
-                </Box>
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-      </TableContainer>
-
-      {/* Условия гарантии */}
-      <Box sx={{ mb: 3 }}>
-        <Typography variant="body2" sx={{ fontSize: '10px', lineHeight: 1.3 }}>
-          Клиент согласен с тем что ипользование устройства без защитного аксессуара лишает гарантии на экран (дисплейный модуль, стекло) поскольку любое физическое воздействие кроме изложенных в инструкции по эксплуатации может служить причиной выхода из строя модуля за которые исполнитель не несет ответственность.
-        </Typography>
-      </Box>
-
-      {/* Таблица выполненных работ */}
-      <TableContainer component={Paper} sx={{ mb: 3, border: '1px solid #000' }}>
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell sx={{ border: '1px solid #000', fontWeight: 'bold', textAlign: 'center', fontSize: '11px', width: '5%' }}>№</TableCell>
-              <TableCell sx={{ border: '1px solid #000', fontWeight: 'bold', textAlign: 'center', fontSize: '11px', width: '40%' }}>Наименование работы</TableCell>
-              <TableCell sx={{ border: '1px solid #000', fontWeight: 'bold', textAlign: 'center', fontSize: '11px', width: '15%' }}>Гарантия, дн.</TableCell>
-              <TableCell sx={{ border: '1px solid #000', fontWeight: 'bold', textAlign: 'center', fontSize: '11px', width: '15%' }}>Цена, Р</TableCell>
-              <TableCell sx={{ border: '1px solid #000', fontWeight: 'bold', textAlign: 'center', fontSize: '11px', width: '10%' }}>Скидка, Р</TableCell>
-              <TableCell sx={{ border: '1px solid #000', fontWeight: 'bold', textAlign: 'center', fontSize: '11px', width: '10%' }}>Количество</TableCell>
-              <TableCell sx={{ border: '1px solid #000', fontWeight: 'bold', textAlign: 'center', fontSize: '11px', width: '15%' }}>Сумма, Р</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {act.worksPerformed.map((work, index) => (
-              <TableRow key={work.id}>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>{index + 1}</TableCell>
-                <TableCell sx={{ border: '1px solid #000', fontSize: '11px' }}>{work.name}</TableCell>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>{act.warrantyPeriod}</TableCell>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>{work.cost}</TableCell>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>0</TableCell>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>{work.quantity}</TableCell>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>{work.totalCost}</TableCell>
-              </TableRow>
-            ))}
-            {act.partsUsed.map((part, index) => (
-              <TableRow key={part.id}>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>{act.worksPerformed.length + index + 1}</TableCell>
-                <TableCell sx={{ border: '1px solid #000', fontSize: '11px' }}>{part.name}</TableCell>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>{act.warrantyPeriod}</TableCell>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>{part.unitPrice}</TableCell>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>0</TableCell>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>{part.quantity}</TableCell>
-                <TableCell sx={{ border: '1px solid #000', textAlign: 'center', fontSize: '11px' }}>{part.totalPrice}</TableCell>
-              </TableRow>
-            ))}
-            <TableRow>
-              <TableCell colSpan={6} sx={{ border: '1px solid #000', fontWeight: 'bold', textAlign: 'right', fontSize: '11px' }}>
-                Сумма, Р
-              </TableCell>
-              <TableCell sx={{ border: '1px solid #000', fontWeight: 'bold', textAlign: 'center', fontSize: '11px' }}>
-                {act.totalCost}
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-      </TableContainer>
-
-      {/* Подписи */}
-      <Box sx={{ 
-        display: 'flex', 
-        justifyContent: 'space-between', 
-        alignItems: 'flex-start',
-        mt: 4,
-        '@media print': {
-          marginTop: '30px',
-        }
-      }}>
-        <Box sx={{ flex: 1, mr: 2 }}>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 2, lineHeight: 1.3 }}>
-            Подтверждаю, что исполнитель выполнил указанные работы, функционал согласно приложению 1 проверен. Претензий к внешнему виду и качеству работы не имею. Ознакомлен(а) с условиями гарантии, устройство принял(а) без замечаний.
-          </Typography>
-          <Box sx={{ 
-            height: 40, 
-            borderBottom: '1px solid #000', 
-            mb: 1,
-            '@media print': {
-              height: '50px',
-            }
-          }}>
-            {/* Место для подписи клиента */}
-          </Box>
-          <Typography variant="caption" sx={{ fontSize: '10px', textAlign: 'center', display: 'block' }}>
-            Подпись клиента
-          </Typography>
-        </Box>
-
-        <Box sx={{ flex: 1, ml: 2 }}>
-          <Typography variant="body2" sx={{ fontSize: '10px', mb: 2, lineHeight: 1.3 }}>
-            Выполнил указанные в акте работы, передал устройство клиенту, подтверждая гарантию на выполненные работы в соответствии с условиями гарантии.
-          </Typography>
-          <Box sx={{ 
-            height: 40, 
-            borderBottom: '1px solid #000', 
-            mb: 1,
-            '@media print': {
-              height: '50px',
-            }
-          }}>
-            {/* Место для подписи мастера */}
-          </Box>
-          <Typography variant="caption" sx={{ fontSize: '10px', textAlign: 'center', display: 'block' }}>
-            Подпись исполнителя
-          </Typography>
-        </Box>
-      </Box>
-    </Box>
+  const renderTemplateDocument = (html: string) => (
+    <Box
+      id="document-content"
+      sx={{
+        ...pageSx,
+        '& h1, & h2, & h3': { mt: 0, mb: 1.5, color: '#000' },
+        '& p': { m: 0, mb: 1.2, fontSize: '12px', lineHeight: 1.6 },
+        '& table': { width: '100%', borderCollapse: 'collapse', mb: 2 },
+        '& td, & th': { border: '1px solid #8da0a6', padding: '8px 10px', fontSize: '12px', verticalAlign: 'top' },
+        '& ul, & ol': { pl: 2.5, mb: 1.5 },
+      }}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
   );
+
+  const renderAcceptance = (act: AcceptanceAct) => {
+    const acceptanceDate = formatDate(act.acceptanceDate);
+    const clientName = `${act.client.firstName} ${act.client.lastName}`.trim();
+    const expectedDate = formatDate(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000));
+    const prepay = Number(act.advancePayment || 0);
+    const deviceName = [act.device.brand, act.device.model].filter(Boolean).join(' ').trim();
+
+    return (
+      <Box id="document-content" sx={pageSx}>
+        {renderTop('Акт приема - передачи', 'Следите за статусом вашего заказа', acceptanceDate, company.scheduleAcceptance)}
+
+        <Box component="table" sx={tableSx}>
+          <Box component="thead">
+            <Box component="tr">
+              <Box component="th" sx={headerCellSx}>Клиент</Box>
+              <Box component="th" sx={headerCellSx}>Устройство</Box>
+              <Box component="th" sx={headerCellSx}>Ремонт</Box>
+            </Box>
+          </Box>
+          <Box component="tbody">
+            <Box component="tr">
+              <Box component="td" sx={cellSx}>
+                <InfoLine label="ФИО Клиента:" value={displayValue(clientName)} />
+                <InfoLine label="Номер телефона клиента:" value={displayValue(act.client.phone)} />
+                <InfoLine label="Комплектация:" value={displayValue(act.client.address)} />
+                <InfoLine label="Заметки:" value={displayValue(act.client.notes)} />
+              </Box>
+              <Box component="td" sx={cellSx}>
+                <InfoLine label="Устройство:" value={displayValue(deviceName)} />
+                <InfoLine label="Пароль:" value="" />
+                <InfoLine label="Цвет:" value={displayValue(act.device.color)} />
+                <InfoLine label="IMEI:" value={displayValue(act.device.imei)} />
+                <InfoLine label="S/N:" value={displayValue(act.device.serialNumber)} />
+                <InfoLine label="Внешний вид устройства:" value={displayValue(act.device.externalCondition)} />
+              </Box>
+              <Box component="td" sx={cellSx}>
+                <InfoLine label="Ориентировочная стоимость:" value={act.preliminaryCost ? formatMoney(act.preliminaryCost) : ''} />
+                <InfoLine label="Аванс:" value={prepay ? formatMoney(prepay) : ''} />
+                <InfoLine label="Ориентировочный срок ремонта:" value={displayValue(expectedDate)} />
+                <InfoLine label="Заявленные неисправности:" value={displayValue(act.problemDescription)} />
+              </Box>
+            </Box>
+          </Box>
+        </Box>
+
+        <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, mt: 3.2, fontSize: '10px', lineHeight: 1.7 }}>
+          <Box>
+            <Typography sx={{ fontSize: '10px', mb: 2 }}>1. Подписывая данный акт приема — передачи устройства клиент подтверждает, что ознакомлен и согласен с правилами и условиями проведения ремонтных работ, изложенными в публичной оферте сервисного центра.</Typography>
+            <Typography sx={{ fontSize: '10px', mb: 2 }}>2. Установленные узлы или расходные материалы возврату не подлежат, согласно Перечню сложных технических товаров, не подлежащих обмену или возврату.</Typography>
+            <Typography sx={{ fontSize: '10px', mb: 2 }}>3. Клиент согласен с тем, что гарантия от производителя после произведенного ремонта недействительна.</Typography>
+            <Typography sx={{ fontSize: '10px', mb: 2 }}>4. Исполнитель не несет ответственности за возможную потерю информации на внутренних носителях устройства, связанную с заменой узлов и компонентов.</Typography>
+            <Typography sx={{ fontSize: '10px' }}>5. Исполнитель не несет ответственности за сохранность гарантийных пломб сторонних сервисных центров и производителя устройства.</Typography>
+          </Box>
+          <Box>
+            <Typography sx={{ fontSize: '10px', mb: 2 }}>6. Клиент принимает на себя риск, связанный с возможным проявлением при ремонте скрытых дефектов устройства, которые невозможно проверить и зафиксировать в момент приема.</Typography>
+            <Typography sx={{ fontSize: '10px', mb: 2 }}>7. Ремонт и обслуживание осуществляется в соответствии с требованиями нормативных документов и Закона РФ «О защите прав потребителей».</Typography>
+            <Typography sx={{ fontSize: '10px', mb: 2 }}>8. Устройство клиента принимается без разбора и выявления внутренних неисправностей.</Typography>
+            <Typography sx={{ fontSize: '10px', mb: 2 }}>9. Клиент согласен с тем, что при ремонте устройства могут быть заменены компоненты, узлы и модули, влияющие на идентификацию устройства.</Typography>
+            <Typography sx={{ fontSize: '10px' }}>10. Факт возврата устройства из ремонта фиксируется в акте выполненных работ при выдаче устройства.</Typography>
+          </Box>
+        </Box>
+
+        <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, mt: 5.2, alignItems: 'end' }}>
+          <Box>
+            <Typography sx={{ fontSize: '10px', textAlign: 'center', mb: 2 }}>
+              С условиями ознакомлен и согласен, устройство в указанном состоянии и работоспособности передал:
+            </Typography>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1.2, fontSize: '11px' }}>
+              <Box>{formatDate(act.clientSignature?.signedAt || act.acceptanceDate)}</Box>
+              <Box>{act.clientSignature?.signatureData ? '✔' : ''}</Box>
+            </Box>
+            <Box sx={lineBlockSx}>
+              {act.clientSignature?.signatureData && (
+                <Box component="img" src={act.clientSignature.signatureData} alt="client-sign" sx={{ maxHeight: 26 }} />
+              )}
+            </Box>
+            <Typography sx={signatureLabelSx}>Подпись клиента</Typography>
+          </Box>
+
+          <Box>
+            <Typography sx={{ fontSize: '10px', textAlign: 'center', mb: 2 }}>
+              Устройство в указанном состоянии и работоспособности принял:
+            </Typography>
+            <Box sx={{ height: '22px', mb: 1.2 }} />
+            <Box sx={lineBlockSx}>
+              {act.masterSignature?.signatureData && (
+                <Box component="img" src={act.masterSignature.signatureData} alt="master-sign" sx={{ maxHeight: 26 }} />
+              )}
+            </Box>
+            <Typography sx={signatureLabelSx}>Подпись исполнителя</Typography>
+          </Box>
+        </Box>
+      </Box>
+    );
+  };
+
+  const renderCompletionTable = (works: WorkItem[], parts: PartItem[], warrantyDays: number, total: number) => {
+    const rows = [
+      ...works.map((work) => ({
+        name: work.name,
+        warranty: Number(work.warrantyDays ?? warrantyDays) || 0,
+        price: work.cost,
+        quantity: work.quantity,
+        total: work.totalCost,
+      })),
+      ...parts.map((part) => ({
+        name: part.name,
+        warranty: warrantyDays,
+        price: part.unitPrice,
+        quantity: part.quantity,
+        total: part.totalPrice,
+      })),
+    ];
+
+    const completionHeaderSx = {
+      ...headerCellSx,
+      p: 0.75,
+      fontSize: '11px',
+      lineHeight: 1.2,
+      textAlign: 'center',
+      verticalAlign: 'middle',
+      whiteSpace: 'normal',
+      wordBreak: 'normal',
+    };
+
+    return (
+      <Box component="table" sx={{ ...tableSx, mt: 2.8 }}>
+        <Box component="colgroup">
+          <Box component="col" sx={{ width: 36 }} />
+          <Box component="col" />
+          <Box component="col" sx={{ width: 92 }} />
+          <Box component="col" sx={{ width: 82 }} />
+          <Box component="col" sx={{ width: 92 }} />
+          <Box component="col" sx={{ width: 90 }} />
+        </Box>
+        <Box component="thead">
+          <Box component="tr">
+            <Box component="th" sx={completionHeaderSx}>№</Box>
+            <Box component="th" sx={completionHeaderSx}>Наименование работы</Box>
+            <Box component="th" sx={completionHeaderSx}>Гарантия,<br />дн.</Box>
+            <Box component="th" sx={completionHeaderSx}>Цена, ₽</Box>
+            <Box component="th" sx={completionHeaderSx}>Количество</Box>
+            <Box component="th" sx={completionHeaderSx}>Сумма, ₽</Box>
+          </Box>
+        </Box>
+        <Box component="tbody">
+          {rows.map((row, index) => (
+            <Box component="tr" key={`${row.name}-${index}`}>
+              <Box component="td" sx={{ ...cellSx, textAlign: 'center' }}>{index + 1}</Box>
+              <Box component="td" sx={cellSx}>{row.name}</Box>
+              <Box component="td" sx={{ ...cellSx, textAlign: 'center' }}>{row.warranty}</Box>
+              <Box component="td" sx={{ ...cellSx, textAlign: 'right' }}>{formatMoney(row.price)}</Box>
+              <Box component="td" sx={{ ...cellSx, textAlign: 'center' }}>{row.quantity}</Box>
+              <Box component="td" sx={{ ...cellSx, textAlign: 'right' }}>{formatMoney(row.total)}</Box>
+            </Box>
+          ))}
+          <Box component="tr">
+            <Box component="td" sx={{ ...cellSx, textAlign: 'right', fontWeight: 700 }} colSpan={5 as any}>Сумма, ₽</Box>
+            <Box component="td" sx={{ ...cellSx, textAlign: 'right', fontWeight: 700 }}>{formatMoney(total)}</Box>
+          </Box>
+        </Box>
+      </Box>
+    );
+  };
+
+  const renderCompletion = (act: WorkCompletionAct) => {
+    const completionDate = formatDate(act.completionDate);
+    const clientName = `${act.client.firstName} ${act.client.lastName}`.trim();
+    const advance = Math.round((act.totalCost || 0) * 0.3);
+    const deviceName = [act.device.brand, act.device.model].filter(Boolean).join(' ').trim();
+
+    return (
+      <Box id="document-content" sx={pageSx}>
+        {renderTop('Акт выполненных работ', 'Оставьте отзыв', completionDate ? `от ${completionDate}` : 'от', company.scheduleCompletion)}
+
+        <Box component="table" sx={tableSx}>
+          <Box component="thead">
+            <Box component="tr">
+              <Box component="th" sx={headerCellSx}>Клиент</Box>
+              <Box component="th" sx={headerCellSx}>Устройство</Box>
+              <Box component="th" sx={headerCellSx}>Ремонт</Box>
+            </Box>
+          </Box>
+          <Box component="tbody">
+            <Box component="tr">
+              <Box component="td" sx={cellSx}>
+                <InfoLine label="ФИО Клиента:" value={displayValue(clientName)} />
+                <InfoLine label="Номер телефона клиента:" value={displayValue(act.client.phone)} />
+                <InfoLine label="Комплектация:" value={displayValue(act.client.address)} />
+              </Box>
+              <Box component="td" sx={cellSx}>
+                <InfoLine label="Устройство:" value={displayValue(deviceName)} />
+                <InfoLine label="Пароль:" value="" />
+                <InfoLine label="Цвет:" value={displayValue(act.device.color)} />
+                <InfoLine label="IMEI:" value={displayValue(act.device.imei)} />
+                <InfoLine label="S/N:" value={displayValue(act.device.serialNumber)} />
+                <InfoLine label="Внешний вид устройства:" value={displayValue(act.device.externalCondition)} />
+              </Box>
+              <Box component="td" sx={cellSx}>
+                <InfoLine label="Аванс:" value={advance ? formatMoney(advance) : ''} />
+                <InfoLine label="Заявленные неисправности:" value={displayValue(act.worksPerformed.map((item) => item.name).join(', '))} />
+              </Box>
+            </Box>
+            <Box component="tr">
+              <Box component="td" sx={{ ...cellSx, fontSize: '11px' }} colSpan={3 as any}>
+                <Box sx={{ fontWeight: 700, mb: 0.6 }}>Условия гарантии:</Box>
+                Клиент согласен с тем, что использование устройства без защитного аксессуара лишает гарантии на экран
+                и иные чувствительные элементы, поскольку любое физическое воздействие кроме изложенных в инструкции
+                по эксплуатации может служить причиной выхода из строя модуля, за которые исполнитель не несет ответственность.
+              </Box>
+            </Box>
+          </Box>
+        </Box>
+
+        {renderCompletionTable(act.worksPerformed, act.partsUsed, act.warrantyPeriod, act.totalCost)}
+
+        <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, mt: 6.5, alignItems: 'end' }}>
+          <Box>
+            <Typography sx={{ fontSize: '10px', textAlign: 'center', mb: 2 }}>
+              Подтверждаю, что исполнитель выполнил указанные работы, функционал согласно приложению проверен.
+              Претензий к внешнему виду и качеству работы не имею. Ознакомлен(а) с условиями гарантии, устройство принял(а) без замечаний.
+            </Typography>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1.2, fontSize: '11px' }}>
+              <Box>{formatDate(act.clientSignature?.signedAt || act.completionDate)}</Box>
+              <Box>{act.clientSignature?.signatureData ? '✔' : ''}</Box>
+            </Box>
+            <Box sx={lineBlockSx}>
+              {act.clientSignature?.signatureData && (
+                <Box component="img" src={act.clientSignature.signatureData} alt="client-sign" sx={{ maxHeight: 26 }} />
+              )}
+            </Box>
+            <Typography sx={signatureLabelSx}>Подпись клиента</Typography>
+          </Box>
+
+          <Box>
+            <Typography sx={{ fontSize: '10px', textAlign: 'center', mb: 2 }}>
+              Выполнил указанные в акте работы, передал устройство клиенту, подтверждая гарантию на выполненные работы в соответствии с условиями гарантии.
+            </Typography>
+            <Box sx={{ height: '22px', mb: 1.2 }} />
+            <Box sx={lineBlockSx}>
+              {act.masterSignature?.signatureData && (
+                <Box component="img" src={act.masterSignature.signatureData} alt="master-sign" sx={{ maxHeight: 26 }} />
+              )}
+            </Box>
+            <Typography sx={signatureLabelSx}>Подпись исполнителя</Typography>
+          </Box>
+        </Box>
+      </Box>
+    );
+  };
 
   return (
     <>
       <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
-      <DialogTitle sx={{ '@media print': { display: 'none' } }}>
-        <Box display="flex" justifyContent="space-between" alignItems="center">
-          <Typography variant="h6">
-            {documentType === 'acceptance' ? 'Акт приема-передачи' : 'Акт выполненных работ'}
-          </Typography>
-          <Box>
-            <IconButton onClick={handlePrint} disabled={isPrinting} sx={{ mr: 1 }}>
-              <Print />
-            </IconButton>
-            <IconButton onClick={onClose} sx={{ ml: 1 }}>
-              <Close />
-            </IconButton>
+        <Box sx={{ px: 3, py: 2, borderBottom: '1px solid rgba(15, 23, 42, 0.08)' }}>
+          <Box display="flex" justifyContent="space-between" alignItems="center">
+            <Typography variant="h6">
+              {documentType === 'acceptance' ? 'Акт приема-передачи' : 'Акт выполненных работ'}
+            </Typography>
+            <Stack direction="row" spacing={1}>
+              <IconButton onClick={handleDownloadPdf} disabled={isBusy}>
+                <Download />
+              </IconButton>
+              <IconButton onClick={handlePrintPdf} disabled={isBusy}>
+                <Print />
+              </IconButton>
+              <IconButton onClick={onClose}>
+                <Close />
+              </IconButton>
+            </Stack>
           </Box>
         </Box>
-      </DialogTitle>
-        
-        <DialogContent sx={{ p: 0 }}>
-          {documentType === 'acceptance' 
-            ? renderAcceptanceAct(document as AcceptanceAct)
-            : renderWorkCompletionAct(document as WorkCompletionAct)
-          }
+        <DialogContent sx={{ p: 0, bgcolor: '#eceff1' }}>
+          {documentType === 'acceptance'
+            ? activeTemplate?.template
+              ? renderTemplateDocument(buildAcceptanceTemplateHtml(currentDocument as AcceptanceAct))
+              : renderAcceptance(currentDocument as AcceptanceAct)
+            : activeTemplate?.template
+              ? renderTemplateDocument(buildCompletionTemplateHtml(currentDocument as WorkCompletionAct))
+              : renderCompletion(currentDocument as WorkCompletionAct)}
         </DialogContent>
-        
-        <DialogActions sx={{ '@media print': { display: 'none' } }}>
-          <Button onClick={onClose}>
-            Закрыть
-          </Button>
+        <DialogActions sx={{ px: 3, py: 2 }}>
+          <Button startIcon={<Draw />} onClick={() => openSignatureDialog('client')}>Подпись клиента</Button>
+          <Button startIcon={<Draw />} onClick={() => openSignatureDialog('master')}>Подпись исполнителя</Button>
+          <Button onClick={handleDownloadPdf} disabled={isBusy}>Скачать PDF</Button>
+          <Button variant="contained" onClick={handlePrintPdf} disabled={isBusy}>Печать PDF</Button>
+          <Button onClick={onClose}>Закрыть</Button>
         </DialogActions>
       </Dialog>
 
@@ -745,7 +770,11 @@ const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
         open={isSignatureDialogOpen}
         onClose={() => setIsSignatureDialogOpen(false)}
         onSave={handleSignatureSave}
-        signerName={currentSignerRole === 'client' ? document.client.firstName + ' ' + document.client.lastName : 'Мастер'}
+        signerName={
+          currentSignerRole === 'client'
+            ? `${currentDocument.client.firstName} ${currentDocument.client.lastName}`
+            : 'Мастер'
+        }
         signerRole={currentSignerRole}
       />
     </>

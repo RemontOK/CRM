@@ -1,371 +1,451 @@
-import React from 'react';
+﻿import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Avatar,
   Box,
-  Grid,
   Card,
   CardContent,
-  Typography,
-  Avatar,
-  LinearProgress,
   Chip,
+  Grid,
   List,
   ListItem,
   ListItemText,
-  ListItemAvatar,
-  Divider,
+  Stack,
+  Typography,
 } from '@mui/material';
 import {
-  TrendingUp,
-  People,
-  Assignment,
   AttachMoney,
-  Star,
-  Inventory,
-  Schedule,
-  CheckCircle,
+  BuildCircleOutlined,
+  PeopleOutline,
+  QueryStatsOutlined,
+  TaskAltOutlined,
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
+import { useNavigate } from 'react-router-dom';
 import {
-  BarChart,
   Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  LineChart,
-  Line,
 } from 'recharts';
+import { CashOperation, Client, Order } from '../../types';
+import { cashService } from '../../services/cashService';
+import { clientService } from '../../services/clientService';
+import { orderService } from '../../services/orderService';
+import { heroCardSx, pageShellSx, panelCardSx } from '../../styles/ui';
+import { getOrderTotal } from '../../utils/orderMetrics';
 
-// Mock data
-const statsData: Array<{
-  title: string;
-  value: string;
-  change: string;
-  changeType: 'positive' | 'negative';
-  icon: React.ReactNode;
-  color: string;
-}> = [
-  {
-    title: 'Всего заказов',
-    value: '1,247',
-    change: '+12%',
-    changeType: 'positive',
-    icon: <Assignment />,
-    color: '#1976d2',
-  },
-  {
-    title: 'Активные заказы',
-    value: '89',
-    change: '+5%',
-    changeType: 'positive',
-    icon: <Schedule />,
-    color: '#ed6c02',
-  },
-  {
-    title: 'Завершенные',
-    value: '1,158',
-    change: '+18%',
-    changeType: 'positive',
-    icon: <CheckCircle />,
-    color: '#2e7d32',
-  },
-  {
-    title: 'Доход за месяц',
-    value: '₽2,847,500',
-    change: '+23%',
-    changeType: 'positive',
-    icon: <AttachMoney />,
-    color: '#9c27b0',
-  },
-  {
-    title: 'Клиенты',
-    value: '3,421',
-    change: '+8%',
-    changeType: 'positive',
-    icon: <People />,
-    color: '#f57c00',
-  },
-  {
-    title: 'Запчасти на складе',
-    value: '1,234',
-    change: '-3%',
-    changeType: 'negative',
-    icon: <Inventory />,
-    color: '#d32f2f',
-  },
-];
-
-const revenueData = [
-  { month: 'Янв', revenue: 2400000 },
-  { month: 'Фев', revenue: 2200000 },
-  { month: 'Мар', revenue: 2800000 },
-  { month: 'Апр', revenue: 2600000 },
-  { month: 'Май', revenue: 3200000 },
-  { month: 'Июн', revenue: 2847500 },
-];
-
-const orderStatusData = [
-  { name: 'Завершено', value: 65, color: '#2e7d32' },
-  { name: 'В работе', value: 20, color: '#ed6c02' },
-  { name: 'Ожидание', value: 10, color: '#1976d2' },
-  { name: 'Отменено', value: 5, color: '#d32f2f' },
-];
-
-const topTechnicians = [
-  { name: 'Иван Петров', orders: 45, revenue: 125000, rating: 4.9 },
-  { name: 'Мария Сидорова', orders: 38, revenue: 98000, rating: 4.8 },
-  { name: 'Алексей Козлов', orders: 32, revenue: 87000, rating: 4.7 },
-  { name: 'Елена Волкова', orders: 28, revenue: 76000, rating: 4.6 },
-];
-
-const recentOrders = [
-  { id: '#001247', client: 'Петров И.И.', device: 'iPhone 14', status: 'В работе', amount: 15000 },
-  { id: '#001246', client: 'Сидорова М.А.', device: 'Samsung Galaxy S23', status: 'Завершен', amount: 12000 },
-  { id: '#001245', client: 'Козлов А.В.', device: 'MacBook Pro', status: 'Ожидание', amount: 45000 },
-  { id: '#001244', client: 'Волкова Е.С.', device: 'iPad Air', status: 'В работе', amount: 18000 },
-];
-
-const StatCard: React.FC<{
-  title: string;
-  value: string;
-  change: string;
-  changeType: 'positive' | 'negative';
-  icon: React.ReactNode;
-  color: string;
-}> = ({ title, value, change, changeType, icon, color }) => (
-  <motion.div
-    whileHover={{ scale: 1.02 }}
-    transition={{ duration: 0.2 }}
-  >
-    <Card sx={{ height: '100%', position: 'relative', overflow: 'hidden' }}>
-      <CardContent>
-        <Box display="flex" alignItems="center" justifyContent="space-between" mb={2}>
-          <Avatar sx={{ bgcolor: color, width: 56, height: 56 }}>
-            {icon}
-          </Avatar>
-          <Chip
-            label={change}
-            color={changeType === 'positive' ? 'success' : 'error'}
-            size="small"
-            variant="outlined"
-          />
-        </Box>
-        <Typography variant="h4" fontWeight="bold" gutterBottom>
-          {value}
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          {title}
-        </Typography>
-      </CardContent>
-      <Box
-        sx={{
-          position: 'absolute',
-          top: 0,
-          right: 0,
-          width: 100,
-          height: 100,
-          background: `linear-gradient(135deg, ${color}20, ${color}10)`,
-          borderRadius: '0 0 0 100%',
-        }}
-      />
-    </Card>
-  </motion.div>
-);
+const monthFormatter = new Intl.DateTimeFormat('ru-RU', { month: 'short' });
 
 const Dashboard: React.FC = () => {
-  return (
-    <Box>
-      <Typography variant="h4" fontWeight="bold" gutterBottom>
-        Дашборд
-      </Typography>
-      <Typography variant="body1" color="text.secondary" sx={{ mb: 4 }}>
-        Обзор деятельности сервисного центра
-      </Typography>
+  const navigate = useNavigate();
+  const [ordersData, setOrdersData] = useState<Order[]>([]);
+  const [clientsData, setClientsData] = useState<Client[]>([]);
+  const [cashOperations, setCashOperations] = useState<CashOperation[]>([]);
 
-      {/* Statistics Cards */}
-      <Grid container spacing={3} sx={{ mb: 4 }}>
-        {statsData.map((stat, index) => (
-          <Grid item xs={12} sm={6} md={4} lg={2} key={index}>
-            <StatCard {...stat} />
+  useEffect(() => {
+    const loadDashboard = async () => {
+      await Promise.all([
+        clientService.refreshFromApi(),
+        cashService.refreshFromApi(),
+      ]);
+      const orders = await orderService.getOrders();
+      setOrdersData(orders);
+      setClientsData(clientService.getClients());
+      setCashOperations(cashService.getOperations());
+    };
+
+    void loadDashboard();
+  }, []);
+
+  const activeOrders = useMemo(
+    () => ordersData.filter((order) => !['completed', 'cancelled'].includes(order.status)),
+    [ordersData]
+  );
+
+  const paidOrders = useMemo(
+    () => ordersData.filter((order) => order.isPaid || (order.payments || []).length > 0),
+    [ordersData]
+  );
+
+  const totalRevenue = useMemo(
+    () =>
+      cashOperations
+        .filter((operation) => operation.type === 'income')
+        .reduce((sum, operation) => sum + operation.amount, 0),
+    [cashOperations]
+  );
+
+  const averageCheck = useMemo(() => {
+    if (paidOrders.length === 0) {
+      return 0;
+    }
+
+    const totalPaid = paidOrders.reduce((sum, order) => {
+      const paid = (order.payments || []).reduce((paymentSum, payment) => paymentSum + payment.amount, 0);
+      return sum + paid;
+    }, 0);
+
+    return Math.round(totalPaid / paidOrders.length);
+  }, [paidOrders]);
+
+  const repeatClients = useMemo(
+    () => clientsData.filter((client) => client.totalOrders > 1).length,
+    [clientsData]
+  );
+
+  const urgentOrders = useMemo(
+    () => activeOrders.filter((order) => order.priority === 'urgent').length,
+    [activeOrders]
+  );
+
+  const orderFilterCards = useMemo(
+    () => [
+      {
+        key: 'active',
+        label: 'Активные',
+        value: activeOrders.length,
+        path: '/orders?scope=active&status=all&period=all',
+      },
+      {
+        key: 'ready',
+        label: 'Готов',
+        value: ordersData.filter((order) => order.status === 'ready').length,
+        path: '/orders?scope=active&status=ready&period=all',
+      },
+      {
+        key: 'waiting_parts',
+        label: 'Ожидание запчастей',
+        value: ordersData.filter((order) => order.status === 'waiting_parts').length,
+        path: '/orders?scope=active&status=waiting_parts&period=all',
+      },
+    ],
+    [activeOrders.length, ordersData]
+  );
+
+  const stats = useMemo(
+    () => [
+      {
+        title: 'Заказов в системе',
+        value: ordersData.length.toLocaleString('ru-RU'),
+        note: `Завершено: ${ordersData.filter((order) => order.status === 'completed').length}`,
+        icon: <BuildCircleOutlined />,
+      },
+      {
+        title: 'Активных ремонтов',
+        value: activeOrders.length.toLocaleString('ru-RU'),
+        note: urgentOrders > 0 ? `Срочных заказов: ${urgentOrders}` : 'Срочных заказов нет',
+        icon: <TaskAltOutlined />,
+      },
+      {
+        title: 'Клиентов',
+        value: clientsData.length.toLocaleString('ru-RU'),
+        note: repeatClients > 0 ? `Повторных клиентов: ${repeatClients}` : 'Повторных клиентов пока нет',
+        icon: <PeopleOutline />,
+      },
+      {
+        title: 'Оборот',
+        value: `${totalRevenue.toLocaleString('ru-RU')} ₽`,
+        note: averageCheck > 0 ? `Средний чек ${averageCheck.toLocaleString('ru-RU')} ₽` : 'Оплат пока нет',
+        icon: <AttachMoney />,
+      },
+    ],
+    [activeOrders.length, averageCheck, clientsData.length, ordersData, repeatClients, totalRevenue, urgentOrders]
+  );
+
+  const revenue = useMemo(() => {
+    const months = Array.from({ length: 6 }, (_, index) => {
+      const date = new Date();
+      date.setMonth(date.getMonth() - (5 - index), 1);
+      return {
+        key: `${date.getFullYear()}-${date.getMonth()}`,
+        month: monthFormatter.format(date).replace('.', ''),
+        revenue: 0,
+      };
+    });
+
+    const incomeOperations = cashOperations.filter((operation) => operation.type === 'income');
+    incomeOperations.forEach((operation) => {
+      const date = new Date(operation.processedAt);
+      const key = `${date.getFullYear()}-${date.getMonth()}`;
+      const monthEntry = months.find((item) => item.key === key);
+      if (monthEntry) {
+        monthEntry.revenue += operation.amount;
+      }
+    });
+
+    return months.map(({ month, revenue: monthRevenue }) => ({ month, revenue: monthRevenue }));
+  }, [cashOperations]);
+
+  const workloads = useMemo(() => {
+    const statusMap: Record<string, { name: string; value: number; color: string }> = {
+      diagnosis: { name: 'Диагностика', value: 0, color: '#2563eb' },
+      waiting_parts: { name: 'Ждут запчасти', value: 0, color: '#ea580c' },
+      waiting_client: { name: 'Ждут клиента', value: 0, color: '#0f766e' },
+      in_progress: { name: 'В работе', value: 0, color: '#7c3aed' },
+      ready: { name: 'Готовы', value: 0, color: '#16a34a' },
+      completed: { name: 'Завершены', value: 0, color: '#475569' },
+    };
+
+    ordersData.forEach((order) => {
+      if (statusMap[order.status]) {
+        statusMap[order.status].value += 1;
+      }
+    });
+
+    return Object.values(statusMap).filter((item) => item.value > 0);
+  }, [ordersData]);
+
+  const workshopQueue = useMemo(
+    () => [
+      { stage: 'Ожидают диагностику', count: ordersData.filter((order) => order.status === 'diagnosis').length },
+      { stage: 'Ожидают запчасти', count: ordersData.filter((order) => order.status === 'waiting_parts').length },
+      { stage: 'В работе', count: ordersData.filter((order) => order.status === 'in_progress').length },
+      { stage: 'Готовы к выдаче', count: ordersData.filter((order) => order.status === 'ready').length },
+    ],
+    [ordersData]
+  );
+
+  const recentOrders = useMemo(
+    () =>
+      [...ordersData]
+        .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
+        .slice(0, 5)
+        .map((order) => ({
+          id: order.orderNumber,
+          client: order.clientName || 'Без клиента',
+          device: [order.deviceBrand, order.deviceModel].filter(Boolean).join(' ') || 'Без устройства',
+          status:
+            {
+              diagnosis: 'Диагностика',
+              waiting_parts: 'Ждут запчасти',
+              waiting_client: 'Ждут клиента',
+              in_progress: 'В работе',
+              ready: 'Готов',
+              completed: 'Завершен',
+              cancelled: 'Отменен',
+              pending: 'Новый',
+            }[order.status] || order.status,
+          amount: `${getOrderTotal(order).toLocaleString('ru-RU')} ₽`,
+        })),
+    [ordersData]
+  );
+
+  return (
+    <Box sx={pageShellSx}>
+      <Box sx={heroCardSx}>
+        <Typography variant="overline" sx={{ color: 'rgba(255,255,255,0.68)', letterSpacing: 1.4 }}>
+          НЭК СЕРВИС · ОПЕРАЦИОННЫЙ ОБЗОР
+        </Typography>
+        <Typography variant="h3" sx={{ mt: 1.5, mb: 1.5, color: 'common.white' }}>
+          Сводка по сервисному центру
+        </Typography>
+        <Typography sx={{ maxWidth: 760, color: 'rgba(255,255,255,0.78)' }}>
+          Здесь вы видите основные показатели сервиса: активные заказы, клиентов, выручку и текущую загрузку команды.
+        </Typography>
+      </Box>
+
+      <Grid container spacing={3}>
+        {stats.map((item) => (
+          <Grid item xs={12} md={6} xl={3} key={item.title}>
+            <motion.div whileHover={{ y: -4 }} transition={{ duration: 0.2 }}>
+              <Card sx={{ ...panelCardSx, height: '100%' }}>
+                <CardContent>
+                  <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={2}>
+                    <Box>
+                      <Typography variant="body2" color="text.secondary">
+                        {item.title}
+                      </Typography>
+                      <Typography variant="h4" sx={{ mt: 1, mb: 1 }}>
+                        {item.value}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        {item.note}
+                      </Typography>
+                    </Box>
+                    <Avatar sx={{ bgcolor: 'rgba(234, 88, 12, 0.12)', color: 'primary.main' }}>{item.icon}</Avatar>
+                  </Stack>
+                </CardContent>
+              </Card>
+            </motion.div>
+          </Grid>
+        ))}
+      </Grid>
+
+      <Grid container spacing={1.5}>
+        {orderFilterCards.map((item) => (
+          <Grid item xs={12} md={4} key={item.key}>
+            <Card
+              onClick={() => navigate(item.path)}
+              sx={{
+                ...panelCardSx,
+                cursor: 'pointer',
+                borderRadius: 1,
+                boxShadow: 'none',
+                transition: 'border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease',
+                '&:hover': {
+                  borderColor: 'rgba(234, 88, 12, 0.34)',
+                  backgroundColor: 'rgba(255, 247, 237, 0.82)',
+                  transform: 'translateY(-2px)',
+                },
+              }}
+            >
+              <CardContent sx={{ py: 1.4, '&:last-child': { pb: 1.4 } }}>
+                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
+                  {item.label}
+                </Typography>
+                <Typography variant="h4" fontWeight={800} sx={{ mt: 0.25, lineHeight: 1.05 }}>
+                  {item.value.toLocaleString('ru-RU')}
+                </Typography>
+              </CardContent>
+            </Card>
           </Grid>
         ))}
       </Grid>
 
       <Grid container spacing={3}>
-        {/* Revenue Chart */}
-        <Grid item xs={12} lg={8}>
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5 }}
-          >
-            <Card>
-              <CardContent>
-                <Typography variant="h6" fontWeight="600" gutterBottom>
-                  Динамика доходов
-                </Typography>
-                <Box height={300}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={revenueData}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="month" />
-                      <YAxis />
-                      <Tooltip formatter={(value) => [`₽${value.toLocaleString()}`, 'Доход']} />
-                      <Line
-                        type="monotone"
-                        dataKey="revenue"
-                        stroke="#1976d2"
-                        strokeWidth={3}
-                        dot={{ fill: '#1976d2', strokeWidth: 2, r: 6 }}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
+        <Grid item xs={12} xl={8}>
+          <Card sx={{ ...panelCardSx, height: '100%' }}>
+            <CardContent>
+              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
+                <Box>
+                  <Typography variant="h5">Выручка по месяцам</Typography>
+                  <Typography color="text.secondary">Реальная динамика поступлений по кассе</Typography>
                 </Box>
-              </CardContent>
-            </Card>
-          </motion.div>
+                <Chip icon={<QueryStatsOutlined />} label="Данные из кассы" color="primary" variant="outlined" />
+              </Stack>
+              <Box height={320}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={revenue}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(15,23,42,0.08)" />
+                    <XAxis dataKey="month" />
+                    <YAxis />
+                    <Tooltip formatter={(value: number) => `${value.toLocaleString('ru-RU')} ₽`} />
+                    <Line type="monotone" dataKey="revenue" stroke="#ea580c" strokeWidth={3} dot={{ r: 5 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </Box>
+            </CardContent>
+          </Card>
         </Grid>
 
-        {/* Order Status Pie Chart */}
-        <Grid item xs={12} lg={4}>
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.1 }}
-          >
-            <Card>
-              <CardContent>
-                <Typography variant="h6" fontWeight="600" gutterBottom>
-                  Статус заказов
-                </Typography>
-                <Box height={300}>
+        <Grid item xs={12} xl={4}>
+          <Card sx={{ ...panelCardSx, height: '100%' }}>
+            <CardContent>
+              <Typography variant="h5">Распределение заказов</Typography>
+              <Typography color="text.secondary" sx={{ mb: 3 }}>
+                Фактическое распределение по статусам
+              </Typography>
+              <Box height={320}>
+                {workloads.length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
-                      <Pie
-                        data={orderStatusData}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={60}
-                        outerRadius={100}
-                        paddingAngle={5}
-                        dataKey="value"
-                      >
-                        {orderStatusData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.color} />
+                      <Pie data={workloads} dataKey="value" nameKey="name" innerRadius={72} outerRadius={112} paddingAngle={4}>
+                        {workloads.map((item) => (
+                          <Cell key={item.name} fill={item.color} />
                         ))}
                       </Pie>
-                      <Tooltip formatter={(value) => [`${value}%`, 'Процент']} />
+                      <Tooltip formatter={(value: number) => `${value} шт.`} />
                     </PieChart>
                   </ResponsiveContainer>
-                </Box>
-              </CardContent>
-            </Card>
-          </motion.div>
+                ) : (
+                  <Stack alignItems="center" justifyContent="center" sx={{ height: '100%' }}>
+                    <Typography color="text.secondary">Пока нет заказов для аналитики</Typography>
+                  </Stack>
+                )}
+              </Box>
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+
+      <Grid container spacing={3}>
+        <Grid item xs={12} xl={5}>
+          <Card sx={{ ...panelCardSx, height: '100%' }}>
+            <CardContent>
+              <Typography variant="h5">Очередь мастерской</Typography>
+              <Typography color="text.secondary" sx={{ mb: 3 }}>
+                Операционная загрузка по этапам
+              </Typography>
+              <Box height={280}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={workshopQueue}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(15,23,42,0.08)" />
+                    <XAxis dataKey="stage" hide />
+                    <YAxis />
+                    <Tooltip formatter={(value: number) => `${value} шт.`} />
+                    <Bar dataKey="count" fill="#0f766e" radius={[8, 8, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </Box>
+              <Stack spacing={1.25} sx={{ mt: 1 }}>
+                {workshopQueue.map((item) => (
+                  <Stack key={item.stage} direction="row" justifyContent="space-between">
+                    <Typography color="text.secondary">{item.stage}</Typography>
+                    <Typography fontWeight={700}>{item.count}</Typography>
+                  </Stack>
+                ))}
+              </Stack>
+            </CardContent>
+          </Card>
         </Grid>
 
-        {/* Top Technicians */}
-        <Grid item xs={12} lg={6}>
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.2 }}
-          >
-            <Card>
-              <CardContent>
-                <Typography variant="h6" fontWeight="600" gutterBottom>
-                  Топ техников
-                </Typography>
-                <List>
-                  {topTechnicians.map((tech, index) => (
-                    <React.Fragment key={index}>
-                      <ListItem>
-                        <ListItemAvatar>
-                          <Avatar sx={{ bgcolor: 'primary.main' }}>
-                            {tech.name.split(' ').map(n => n[0]).join('')}
-                          </Avatar>
-                        </ListItemAvatar>
+        <Grid item xs={12} xl={7}>
+          <Card sx={{ ...panelCardSx, height: '100%' }}>
+            <CardContent sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+              <Typography variant="h5">Последние заказы</Typography>
+              <Typography color="text.secondary" sx={{ mb: 2.5 }}>
+                Последние реальные заказы из CRM
+              </Typography>
+              {recentOrders.length > 0 ? (
+                <Box
+                  sx={{
+                    flex: 1,
+                    maxHeight: 456,
+                    overflowY: 'auto',
+                    pr: 0.5,
+                    scrollbarWidth: 'none',
+                    msOverflowStyle: 'none',
+                    '&::-webkit-scrollbar': { display: 'none' },
+                  }}
+                >
+                  <List disablePadding>
+                    {recentOrders.map((order) => (
+                      <ListItem key={order.id} disableGutters sx={{ py: 1.4, borderBottom: '1px solid rgba(15,23,42,0.06)' }}>
                         <ListItemText
-                          primary={tech.name}
+                          primary={
+                            <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1}>
+                              <Typography fontWeight={700}>{order.id}</Typography>
+                              <Typography color="text.secondary">{order.amount}</Typography>
+                            </Stack>
+                          }
                           secondary={
-                            <Box display="flex" alignItems="center" gap={2}>
-                              <Typography variant="body2">
-                                {tech.orders} заказов
+                            <Box component="div" sx={{ mt: 0.75 }}>
+                              <Typography component="div" variant="body2" color="text.primary">
+                                {order.client} В· {order.device}
                               </Typography>
-                              <Typography variant="body2">
-                                ₽{tech.revenue.toLocaleString()}
-                              </Typography>
-                              <Box display="flex" alignItems="center">
-                                <Star sx={{ fontSize: 16, color: 'orange', mr: 0.5 }} />
-                                <Typography variant="body2">{tech.rating}</Typography>
+                              <Box sx={{ mt: 0.75 }}>
+                                <Chip label={order.status} size="small" color="primary" variant="outlined" />
                               </Box>
                             </Box>
                           }
                         />
                       </ListItem>
-                      {index < topTechnicians.length - 1 && <Divider />}
-                    </React.Fragment>
-                  ))}
-                </List>
-              </CardContent>
-            </Card>
-          </motion.div>
-        </Grid>
-
-        {/* Recent Orders */}
-        <Grid item xs={12} lg={6}>
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.3 }}
-          >
-            <Card>
-              <CardContent>
-                <Typography variant="h6" fontWeight="600" gutterBottom>
-                  Последние заказы
-                </Typography>
-                <List>
-                  {recentOrders.map((order, index) => (
-                    <React.Fragment key={index}>
-                      <ListItem>
-                        <ListItemText
-                          primary={
-                            <Box display="flex" justifyContent="space-between" alignItems="center">
-                              <Typography variant="body1" fontWeight="500">
-                                {order.id}
-                              </Typography>
-                              <Chip
-                                label={order.status}
-                                size="small"
-                                color={
-                                  order.status === 'Завершен' ? 'success' :
-                                  order.status === 'В работе' ? 'warning' : 'default'
-                                }
-                              />
-                            </Box>
-                          }
-                          secondary={
-                            <Box>
-                              <Typography variant="body2" color="text.secondary">
-                                {order.client} • {order.device}
-                              </Typography>
-                              <Typography variant="body2" fontWeight="500">
-                                ₽{order.amount.toLocaleString()}
-                              </Typography>
-                            </Box>
-                          }
-                        />
-                      </ListItem>
-                      {index < recentOrders.length - 1 && <Divider />}
-                    </React.Fragment>
-                  ))}
-                </List>
-              </CardContent>
-            </Card>
-          </motion.div>
+                    ))}
+                  </List>
+                </Box>
+              ) : (
+                <Typography color="text.secondary">Пока нет заказов в системе.</Typography>
+              )}
+            </CardContent>
+          </Card>
         </Grid>
       </Grid>
     </Box>
@@ -373,5 +453,3 @@ const Dashboard: React.FC = () => {
 };
 
 export default Dashboard;
-
-
