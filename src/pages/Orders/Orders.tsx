@@ -2586,14 +2586,14 @@ const Orders: React.FC = () => {
     }
 
     const categoryName = (activeQuickSaleOption.category || '').trim().toLowerCase();
-    if (!categoryName) {
-      return [];
-    }
-    return inventoryParts.filter((part) => {
-      const category = (part.category || '').trim().toLowerCase();
-      const subcategory = (part.subcategory || '').trim().toLowerCase();
-      return category === categoryName || subcategory === categoryName;
-    });
+    const parts = !categoryName
+      ? inventoryParts
+      : inventoryParts.filter((part) => {
+          const category = (part.category || '').trim().toLowerCase();
+          const subcategory = (part.subcategory || '').trim().toLowerCase();
+          return category === categoryName || subcategory === categoryName;
+        });
+    return [...parts].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
   }, [inventoryParts, activeQuickSaleOption]);
   const selectedQuickSalePart = React.useMemo(
     () => availableQuickSaleParts.find((part) => part.id === quickSaleForm.partId) || null,

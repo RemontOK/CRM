@@ -86,7 +86,8 @@ const QuickSaleButtonsEditor: React.FC<QuickSaleButtonsEditorProps> = ({ options
   return (
     <Stack spacing={2.5}>
       <Typography variant="body2" color="text.secondary">
-        Кнопки появляются на странице «Заказы» для быстрой продажи товара из выбранной категории склада.
+        Кнопки появляются на странице «Заказы» для быстрой продажи товара из выбранной категории склада —
+        или из всего склада, если категория не выбрана.
       </Typography>
 
       <Box>
@@ -111,11 +112,9 @@ const QuickSaleButtonsEditor: React.FC<QuickSaleButtonsEditorProps> = ({ options
               label="Категория"
               onChange={(event) => setNewOption((prev) => ({ ...prev, category: event.target.value as string }))}
             >
-              {categories.length === 0 && (
-                <MenuItem value="" disabled>
-                  <em>Нет категорий в инвентаре</em>
-                </MenuItem>
-              )}
+              <MenuItem value="">
+                <em>Весь склад</em>
+              </MenuItem>
               {categories.map((category) => (
                 <MenuItem key={category} value={category}>
                   {category}
@@ -174,11 +173,9 @@ const QuickSaleButtonsEditor: React.FC<QuickSaleButtonsEditorProps> = ({ options
                     label="Категория"
                     onChange={(event) => handleUpdate(option.id, { category: event.target.value as string })}
                   >
-                    {categories.length === 0 && (
-                      <MenuItem value="" disabled>
-                        <em>Нет категорий в инвентаре</em>
-                      </MenuItem>
-                    )}
+                    <MenuItem value="">
+                      <em>Весь склад</em>
+                    </MenuItem>
                     {categories.map((category) => (
                       <MenuItem key={category} value={category}>
                         {category}
