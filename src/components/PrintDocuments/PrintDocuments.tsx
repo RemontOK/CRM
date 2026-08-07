@@ -2,6 +2,7 @@ import React from 'react';
 import { Order, Client, Device } from '../../types';
 import { getOrderStatedProblem } from '../../utils/orderProblemText';
 import { getCompanyDisplayName } from '../../hooks/useCompanyName';
+import { appSettingsService } from '../../services/appSettingsService';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 

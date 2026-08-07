@@ -9,7 +9,6 @@ import {
   Notifications,
   PointOfSale,
   ReceiptLong,
-  Stack,
   SupportAgent,
   TextFields,
   Workspaces,

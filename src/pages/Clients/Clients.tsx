@@ -233,7 +233,7 @@ const Clients: React.FC = () => {
       await refreshClients();
       setIsFormOpen(false);
       setEditingClient(null);
-      setFormData(emptyForm);
+      setClientFormInitial(emptyForm);
     } catch {
       toast.error('Не удалось сохранить клиента');
     }
@@ -244,15 +244,15 @@ const Clients: React.FC = () => {
       return;
     }
 
-    const removed = await clientService.deleteClient(deleteCandidate.id);
-    if (removed) {
+    try {
+      await clientService.deleteClient(deleteCandidate.id);
       toast.success('Клиент удален');
       await refreshClients();
       if (selectedClient?.id === deleteCandidate.id) {
         setSelectedClient(null);
         setIsViewOpen(false);
       }
-    } else {
+    } catch {
       toast.error('Не удалось удалить клиента');
     }
 
