@@ -4,10 +4,12 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#000000" />
-    <meta
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <meta name="theme-color" content="#000000" />    <meta
       name="description"
-      content="CRM система для сервисного центра НЭК сервис"
+      content="CRM для сервисного центра"
     />
     <link
       rel="stylesheet"
@@ -17,11 +19,35 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/icon?family=Material+Icons"
     />
-    <title>НЭК Сервис - CRM</title>
-    <script type="module" crossorigin src="/CRM/assets/index-CIXF2Bnw.js"></script>
-    <link rel="modulepreload" crossorigin href="/CRM/assets/vendor-Ckhrjn13.js">
-    <link rel="modulepreload" crossorigin href="/CRM/assets/mui-COZzzynO.js">
-    <link rel="modulepreload" crossorigin href="/CRM/assets/router-DOaZiCKN.js">
+    <title>CRM для сервисного центра</title>
+    <script>
+      (function () {
+        var buildKey = 'crm_build_id';
+        var reloadPrefix = 'crm_build_reload_';
+        fetch('/build-version.json?_=' + Date.now(), { cache: 'no-store' })
+          .then(function (response) {
+            return response.ok ? response.json() : null;
+          })
+          .then(function (payload) {
+            if (!payload || !payload.id) {
+              return;
+            }
+            var buildId = String(payload.id);
+            var stored = sessionStorage.getItem(buildKey);
+            if (stored && stored !== buildId && !sessionStorage.getItem(reloadPrefix + buildId)) {
+              sessionStorage.setItem(buildKey, buildId);
+              sessionStorage.setItem(reloadPrefix + buildId, '1');
+              var url = new URL(window.location.href);
+              url.searchParams.set('_v', buildId);
+              window.location.replace(url.toString());
+              return;
+            }
+            sessionStorage.setItem(buildKey, buildId);
+          })
+          .catch(function () {});
+      })();
+    </script>
+    <script type="module" crossorigin src="/CRM/assets/index-kvRcRqKc.js"></script>
     <link rel="stylesheet" crossorigin href="/CRM/assets/index-CDS4DQk9.css">
   </head>
   <body>

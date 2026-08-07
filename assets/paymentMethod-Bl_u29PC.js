@@ -1,0 +1,1 @@
+const a={cash:"Наличные",card:"Карта",transfer:"Перевод",installment:"Рассрочка",online:"Онлайн перевод",bank_terminal:"Терминал",cashbox:"Касса",mixed:"Смешанный",касса:"Касса"},s=(r,o)=>{const t=String(r||"").trim();if(!t)return"Не указан";const e=o?.find(n=>n.code===t||n.code===t.toLowerCase())?.label;return e?.trim()?e.trim():a[t.toLowerCase()]||t};export{s as g};
