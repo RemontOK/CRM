@@ -1,5 +1,10 @@
 import { Employee } from '../types';
 import { apiService } from './api';
+import { normalizeAllowedModules } from '../utils/employeeModuleAccess';
+import {
+  normalizeSelfEditableFields,
+  normalizeVisibleSections,
+} from '../utils/employeeSettingsAccess';
 import { normalizePhoneForStorage } from '../utils/phone';
 
 const EMPLOYEES_STORAGE_KEY = 'crm_employees';
@@ -35,6 +40,11 @@ const normalizeEmployee = (employee: Employee): Employee => ({
   deliveryRate: Number(employee.deliveryRate) || 0,
   hireDate: new Date(employee.hireDate),
   lastLogin: new Date(employee.lastLogin),
+  access: {
+    allowedModules: normalizeAllowedModules(employee.access?.allowedModules),
+    visibleSections: normalizeVisibleSections(employee.access?.visibleSections),
+    selfEditableFields: normalizeSelfEditableFields(employee.access?.selfEditableFields),
+  },
 });
 
 const mapApiUserToEmployee = (user: any): Employee =>
@@ -60,6 +70,11 @@ const mapApiUserToEmployee = (user: any): Employee =>
     isActive: user.isActive ?? true,
     hireDate: new Date(user.hireDate || user.createdAt || new Date()),
     lastLogin: new Date(user.lastLogin || user.updatedAt || new Date()),
+    access: {
+      allowedModules: normalizeAllowedModules(user.access?.allowedModules),
+      visibleSections: normalizeVisibleSections(user.access?.visibleSections),
+      selfEditableFields: normalizeSelfEditableFields(user.access?.selfEditableFields),
+    },
   });
 
 class EmployeeService {
@@ -86,6 +101,11 @@ class EmployeeService {
 
   private saveToCache() {
     localStorage.setItem(EMPLOYEES_STORAGE_KEY, JSON.stringify(this.employees));
+  }
+
+  clearSession() {
+    this.employees = [];
+    localStorage.removeItem(EMPLOYEES_STORAGE_KEY);
   }
 
   async refreshFromApi() {

@@ -1,5 +1,6 @@
-﻿import React, { useEffect, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
+  Avatar,
   Box,
   Card,
   CardContent,
@@ -21,7 +22,12 @@ import {
   InputAdornment,
   Autocomplete,
   Stack,
+  Alert,
+  Badge,
+  ToggleButton,
+  ToggleButtonGroup,
 } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import {
   Add,
   Search,
@@ -30,16 +36,19 @@ import {
   Delete,
   Visibility,
   AttachMoney,
+  Savings,
   Description,
   Build,
   LocalShipping,
   Print,
   Phone,
-  WhatsApp,
   Telegram,
-  CheckCircle,
+  Sms,
+  Send,
+  ContentCopy,
+  Close,
   Security,
-  CleaningServices,
+  ChatBubbleOutline,
 } from '@mui/icons-material';
 import { GridColDef } from '@mui/x-data-grid';
 import { useLocation } from 'react-router-dom';
@@ -47,11 +56,22 @@ import toast from 'react-hot-toast';
 import { orderService } from '../../services/orderService';
 import { getApiErrorMessage } from '../../services/api';
 import { documentService } from '../../services/documentService';
+import {
+  enrichAcceptanceActForDisplay,
+  enrichActDeviceFromOrder,
+  getOrderInternalNotes,
+  prepareAcceptanceActClient,
+} from '../../utils/acceptanceActFields';
+import { getOrderProblemForDocuments, getOrderStatedProblem } from '../../utils/orderProblemText';
+import { notifyAutoStatusSmsToasts } from '../../utils/orderSmsNotifications';
+import { calcEstimatedCompletionDate } from '../../utils/orderDates';
 import { clientService } from '../../services/clientService';
 import { inventoryService } from '../../services/inventoryService';
 import { taxonomyService } from '../../services/taxonomyService';
 import { cashService } from '../../services/cashService';
 import { employeeService } from '../../services/employeeService';
+import { smsService } from '../../services/smsService';
+import { telegramService } from '../../services/telegramService';
 import {
   appSettingsService,
   getCompletedOrderStatus,
@@ -62,7 +82,6 @@ import {
   getReadyOrderStatus,
   isFinalOrderStatus,
 } from '../../services/appSettingsService';
-import { smsService } from '../../services/smsService';
 import {
   Order,
   OrderCommunicationEntry,
@@ -75,9 +94,37 @@ import {
   PartItem,
   Employee,
   TaxonomyNode,
+  TelegramInboxItem,
 } from '../../types';
-import DocumentGenerator from '../../components/DocumentGenerator/DocumentGenerator';
-import CreateOrderForm from '../../components/CreateOrderForm/CreateOrderForm';
+import OrderEditDialog from '../../components/OrderEditDialog/OrderEditDialog';
+import OrderAddWorkDialog, { AddWorkFormValues } from '../../components/OrderAddWorkDialog/OrderAddWorkDialog';
+import OrderMasterCommentField from '../../components/OrderMasterCommentField/OrderMasterCommentField';
+import OrderCommunicationComposer from '../../components/OrderCommunicationComposer/OrderCommunicationComposer';
+import OrderPriceListDialog from '../../components/OrderPriceListDialog/OrderPriceListDialog';
+import DataExchangeDialog from '../../components/DataExchangeDialog/DataExchangeDialog';
+import {
+  ORDER_EXCHANGE_COLUMNS,
+  exportOrderRows,
+  importOrderRows,
+  orderTemplateSamples,
+} from '../../utils/ordersExchange';
+import OrderDeliveryDialog, {
+  OrderDeliveryCompletePayload,
+} from '../../components/OrderDeliveryDialog/OrderDeliveryDialog';
+import QuickReceivePartDialog, {
+  QuickReceiveFormValues,
+  emptyQuickReceiveForm,
+} from '../../components/QuickReceivePartDialog/QuickReceivePartDialog';
+import QuickWorkDialog, { QuickWorkFormValues } from '../../components/QuickWorkDialog/QuickWorkDialog';
+import StatusBadgeSelector from '../../components/StatusBadgeSelector/StatusBadgeSelector';
+import { getDefaultClientType } from '../../components/ClientTypeSelector/ClientTypeSelector';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import type { OrderCreationSubmitPayload } from '../../components/OrderCreationWizard/OrderCreationWizard';
+import {
+  buildClientPayloadFromFields,
+  collectClientFieldValues,
+  validateClientFieldsForOrder,
+} from '../../utils/clientFieldUtils';
 import PeriodFilter from '../../components/PeriodFilter/PeriodFilter';
 import { useAuth } from '../../hooks/useAuth';
 import { defaultPeriodFilterValue, isDateWithinRange, PeriodFilterValue, PeriodPreset } from '../../utils/dateRange';
@@ -88,10 +135,34 @@ import {
   getOrderPartsCost,
   getOrderTotal,
 } from '../../utils/orderMetrics';
+import { getOrderLineTitle, getWorkTypeLabel } from '../../utils/orderPartDisplay';
 import { formatPhone, normalizePhoneForCompare, normalizePhoneForStorage } from '../../utils/phone';
+import { getPaymentMethodLabel } from '../../utils/paymentMethod';
+import { isTelegramItemUnread } from '../../hooks/useTelegramInbox';
+import { markTelegramInboxRead, subscribeTelegramInbox, getTelegramInboxSnapshot } from '../../services/telegramInboxStore';
+import {
+  communicationChatAreaSx,
+  communicationComposerInputSx,
+  communicationComposerSx,
+  communicationDialogPaperSx,
+  dashedDividerSx,
+  getChatBubbleStyles,
+  highlightCardSx,
+  infoPanelSx,
+  mergeSx,
+  nestedPanelSx,
+  selectableCardSx,
+  totalPanelSx,
+} from '../../styles/ui';
+
+const DocumentGenerator = React.lazy(() => import('../../components/DocumentGenerator/DocumentGenerator'));
+const CreateOrderForm = React.lazy(() => import('../../components/CreateOrderForm/CreateOrderForm'));
+const OrderCreationWizard = React.lazy(() => import('../../components/OrderCreationWizard/OrderCreationWizard'));
+
 
 // Mock data
-const orders: Order[] = [];
+const mergeOrderInList = (orders: Order[], nextOrder: Order) =>
+  orders.map((order) => (order.id === nextOrder.id ? nextOrder : order));
 // Data for autocomplete
 const deviceBrands = [
   'Apple', 'Samsung', 'Xiaomi', 'Huawei', 'OnePlus', 'Google', 'Sony', 'LG', 
@@ -99,7 +170,13 @@ const deviceBrands = [
   'HP', 'Dell', 'Acer', 'MSI', 'Razer', 'Alienware', 'Прочее'
 ];
 
-const warrantyDayOptions = ['30', '60', '90', '365'];
+const emptyAddWorkForm: AddWorkFormValues = {
+  workName: '',
+  workPrice: '',
+  workQuantity: 1,
+  workWarrantyDays: '30',
+  allowWithoutPart: false,
+};
 
 const deviceModels = {
   'Apple': ['iPhone 15 Pro Max', 'iPhone 15 Pro', 'iPhone 15', 'iPhone 14 Pro Max', 'iPhone 14 Pro', 'iPhone 14', 'iPhone 13 Pro Max', 'iPhone 13 Pro', 'iPhone 13', 'iPhone 12 Pro Max', 'iPhone 12 Pro', 'iPhone 12', 'iPhone 11 Pro Max', 'iPhone 11 Pro', 'iPhone 11', 'iPhone SE', 'iPad Pro', 'iPad Air', 'iPad', 'iPad mini', 'MacBook Pro', 'MacBook Air', 'iMac', 'Mac Studio', 'Mac Pro'],
@@ -125,99 +202,6 @@ const deviceModels = {
   'Razer': ['Blade 15', 'Blade 17', 'Blade Stealth', 'Book 13'],
   'Alienware': ['m15', 'm17', 'x15', 'x17', 'Aurora']
 };
-
-const deviceModelsByType: Record<string, string[]> = {
-  phone: [
-    'Apple iPhone 15 Pro Max', 'Apple iPhone 15 Pro', 'Apple iPhone 15', 'Apple iPhone 14 Pro Max', 'Apple iPhone 14 Pro', 'Apple iPhone 14',
-    'Apple iPhone 13 Pro Max', 'Apple iPhone 13 Pro', 'Apple iPhone 13', 'Apple iPhone 12 Pro Max', 'Apple iPhone 12 Pro', 'Apple iPhone 12',
-    'Apple iPhone 11 Pro Max', 'Apple iPhone 11 Pro', 'Apple iPhone 11', 'Apple iPhone SE',
-    'Samsung Galaxy S24 Ultra', 'Samsung Galaxy S24+', 'Samsung Galaxy S24', 'Samsung Galaxy S23 Ultra', 'Samsung Galaxy S23+', 'Samsung Galaxy S23',
-    'Samsung Galaxy A54', 'Samsung Galaxy A34', 'Samsung Galaxy A24', 'Samsung Galaxy Z Fold 5', 'Samsung Galaxy Z Flip 5',
-    'Xiaomi Mi 14 Pro', 'Xiaomi Mi 14', 'Xiaomi Redmi Note 13 Pro', 'Xiaomi Redmi Note 13', 'Xiaomi Redmi 12', 'POCO X6 Pro', 'POCO F5',
-    'Huawei P60 Pro', 'Huawei P60', 'Huawei Mate 60 Pro', 'Huawei nova 11', 'Huawei nova 10',
-    'Honor Magic 5 Pro', 'Honor Magic 5', 'Honor 90 Pro', 'Honor 90', 'Honor X50',
-    'Realme GT 5', 'Realme 11 Pro+', 'Realme 11 Pro', 'Realme C55',
-    'Oppo Find X6 Pro', 'Oppo Reno 10 Pro', 'Oppo Reno 10', 'Oppo A78',
-    'Vivo X90 Pro', 'Vivo V29', 'Vivo V27', 'Vivo Y36',
-    'Google Pixel 8 Pro', 'Google Pixel 8', 'Google Pixel 7 Pro', 'Google Pixel 7',
-    'Sony Xperia 1 V', 'Sony Xperia 5 V', 'OnePlus 12', 'OnePlus 11', 'Asus ROG Phone 7', 'Asus ZenFone 10',
-  ],
-  tablet: [
-    'Apple iPad Pro', 'Apple iPad Air', 'Apple iPad', 'Apple iPad mini',
-    'Samsung Galaxy Tab S9', 'Samsung Galaxy Tab A8',
-    'Xiaomi Mi Pad 6', 'Huawei MatePad Pro', 'OnePlus Pad Go', 'Google Pixel Tablet', 'Lenovo Tab P11', 'Nokia T20',
-  ],
-  laptop: [
-    'Apple MacBook Pro', 'Apple MacBook Air',
-    'Asus VivoBook', 'Asus ROG Strix', 'Asus TUF Gaming',
-    'Lenovo ThinkPad', 'Lenovo IdeaPad', 'Lenovo Yoga',
-    'HP Pavilion', 'HP Envy', 'HP Spectre', 'HP EliteBook', 'HP ProBook',
-    'Dell XPS 13', 'Dell XPS 15', 'Dell Inspiron', 'Dell Latitude', 'Dell Precision',
-    'Acer Aspire', 'Acer Swift', 'Acer Nitro', 'Acer Predator',
-    'MSI Stealth', 'MSI Raider', 'MSI Katana', 'MSI Sword', 'MSI Creator',
-    'Razer Blade 15', 'Razer Blade 17', 'Razer Blade Stealth', 'Alienware m15', 'Alienware m17', 'Alienware x15', 'Alienware x17',
-  ],
-  desktop: [
-    'Apple iMac', 'Apple Mac Studio', 'Apple Mac Pro',
-    'Dell OptiPlex', 'Dell Precision', 'HP ProDesk', 'HP EliteDesk',
-    'Lenovo ThinkCentre', 'Acer Predator Orion', 'MSI Trident', 'Alienware Aurora',
-  ],
-  other: [
-    'Apple Watch', 'Samsung Galaxy Watch', 'Xiaomi Mi Watch', 'Huawei Watch GT 4',
-    'Sony WH-1000XM5', 'Sony WF-1000XM5',
-  ],
-};
-
-const commonDiagnoses = [
-  'Треснутый экран',
-  'Не включается',
-  'Не заряжается',
-  'Быстро разряжается',
-  'Не работает камера',
-  'Не работает звук',
-  'Не работает микрофон',
-  'Не работает динамик',
-  'Не работает Wi-Fi',
-  'Не работает Bluetooth',
-  'Не работает сенсорный экран',
-  'Не работает кнопка питания',
-  'Не работает кнопка громкости',
-  'Не работает кнопка Home',
-  'Не работает Face ID',
-  'Не работает Touch ID',
-  'Не работает сканер отпечатков',
-  'Перегревается',
-  'Зависает',
-  'Перезагружается',
-  'Не видит SIM-карту',
-  'Не работает GPS',
-  'Не работает датчик приближения',
-  'Не работает акселерометр',
-  'Не работает гироскоп',
-  'Проблемы с сетью',
-  'Проблемы с антенной',
-  'Проблемы с разъемом зарядки',
-  'Проблемы с разъемом наушников',
-  'Проблемы с динамиком',
-  'Проблемы с вибрацией',
-  'Проблемы с подсветкой',
-  'Проблемы с дисплеем',
-  'Проблемы с батареей',
-  'Проблемы с материнской платой',
-  'Проблемы с процессором',
-  'Проблемы с памятью',
-  'Проблемы с накопителем',
-  'Проблемы с видеокартой',
-  'Проблемы с клавиатурой',
-  'Проблемы с тачпадом',
-  'Проблемы с веб-камерой',
-  'Проблемы с портами',
-  'Проблемы с охлаждением',
-  'Проблемы с BIOS',
-  'Проблемы с операционной системой',
-  'Проблемы с программным обеспечением',
-  'Другое',
-];
 
 const commonWorkNames = [
   'Замена экрана',
@@ -289,154 +273,7 @@ const commonWorkNames = [
   'Другое',
 ];
 
-const priceWorkNamesByType: Record<string, string[]> = {
-  phone: [
-    'Диагностика устройства',
-    'Замена экрана оригинал',
-    'Замена экрана копия',
-    'Замена аккумулятора оригинал',
-    'Замена аккумулятора копия',
-    'Замена кнопки питания',
-    'Замена кнопки громкости',
-    'Замена динамика',
-    'Замена микрофона',
-    'Замена камеры',
-    'Замена разъема зарядки',
-    'Замена нижнего шлейфа',
-    'Замена разъема наушников',
-    'Замена корпуса',
-    'Замена задней крышки',
-    'Замена материнской платы',
-    'Ремонт кнопки питания',
-    'Ремонт кнопки громкости',
-    'Ремонт динамика',
-    'Ремонт микрофона',
-    'Ремонт камеры',
-    'Ремонт разъема зарядки',
-    'Ремонт корпуса',
-    'Прошивка устройства',
-    'Восстановление системы',
-    'Восстановление данных',
-    'Ремонт после попадания воды',
-    'Ремонт после падения',
-    'Замена защитного стекла',
-    'Установка защитного стекла',
-    'Замена пленки',
-    'Установка пленки',
-    'Чистка устройства',
-    'Полировка корпуса',
-  ],
-  tablet: [
-    'Диагностика устройства',
-    'Замена экрана оригинал',
-    'Замена экрана копия',
-    'Замена аккумулятора оригинал',
-    'Замена аккумулятора копия',
-    'Замена кнопки питания',
-    'Замена кнопки громкости',
-    'Замена динамика',
-    'Замена микрофона',
-    'Замена камеры',
-    'Замена разъема зарядки',
-    'Замена нижнего шлейфа',
-    'Замена корпуса',
-    'Замена материнской платы',
-    'Ремонт разъема зарядки',
-    'Ремонт корпуса',
-    'Прошивка устройства',
-    'Восстановление системы',
-    'Восстановление данных',
-    'Ремонт после попадания воды',
-    'Ремонт после падения',
-    'Замена защитного стекла',
-    'Установка защитного стекла',
-    'Замена пленки',
-    'Установка пленки',
-    'Чистка устройства',
-  ],
-  laptop: [
-    'Диагностика устройства',
-    'Замена экрана оригинал',
-    'Замена экрана копия',
-    'Замена аккумулятора оригинал',
-    'Замена аккумулятора копия',
-    'Замена клавиатуры',
-    'Замена тачпада',
-    'Замена веб-камеры',
-    'Замена разъема зарядки',
-    'Замена корпуса',
-    'Замена материнской платы',
-    'Замена процессора',
-    'Замена оперативной памяти',
-    'Замена накопителя',
-    'Замена системы охлаждения',
-    'Замена вентилятора',
-    'Замена термопасты',
-    'Ремонт корпуса',
-    'Ремонт материнской платы',
-    'Ремонт системы охлаждения',
-    'Установка операционной системы',
-    'Восстановление системы',
-    'Восстановление данных',
-    'Обновление программного обеспечения',
-    'Настройка устройства',
-    'Настройка сети',
-    'Настройка Wi-Fi',
-    'Оптимизация производительности',
-    'Удаление вирусов',
-    'Восстановление после вирусов',
-    'Очистка от пыли',
-    'Очистка системы охлаждения',
-    'Чистка устройства',
-    'Ремонт после попадания воды',
-    'Ремонт после падения',
-  ],
-  desktop: [
-    'Диагностика устройства',
-    'Замена материнской платы',
-    'Замена процессора',
-    'Замена оперативной памяти',
-    'Замена накопителя',
-    'Замена системы охлаждения',
-    'Замена вентилятора',
-    'Замена термопасты',
-    'Ремонт корпуса',
-    'Ремонт материнской платы',
-    'Ремонт системы охлаждения',
-    'Установка операционной системы',
-    'Восстановление системы',
-    'Восстановление данных',
-    'Обновление программного обеспечения',
-    'Настройка устройства',
-    'Настройка сети',
-    'Настройка Wi-Fi',
-    'Оптимизация производительности',
-    'Удаление вирусов',
-    'Восстановление после вирусов',
-    'Очистка от пыли',
-    'Очистка системы охлаждения',
-    'Чистка устройства',
-    'Ремонт после скачка напряжения',
-    'Ремонт после механических повреждений',
-  ],
-  other: [
-    'Диагностика устройства',
-    'Настройка устройства',
-    'Обновление программного обеспечения',
-    'Восстановление данных',
-    'Чистка устройства',
-    'Полировка корпуса',
-    'Ремонт после попадания воды',
-    'Ремонт после падения',
-    'Ремонт после механических повреждений',
-  ],
-};
-
 const customWorkNamesStorageKey = 'crm_custom_work_names';
-const customDeviceModelsStorageKey = 'crm_custom_device_models_by_type';
-const priceListStorageKey = 'crm_price_list_ekb_2026_v1';
-
-const allDeviceModels = Array.from(new Set(Object.values(deviceModels).flat()));
 
 const priorityOptions = [
   { value: 'low', label: 'Низкий', color: 'success' },
@@ -445,272 +282,60 @@ const priorityOptions = [
   { value: 'urgent', label: 'Срочный', color: 'error' },
 ];
 
-const deviceTypes = ['phone', 'tablet', 'laptop', 'desktop', 'other'];
-const deviceConditions = ['excellent', 'good', 'fair', 'poor'];
-const deviceTypeLabels: Record<string, string> = {
-  phone: 'Телефон',
-  tablet: 'Планшет',
-  laptop: 'Ноутбук',
-  desktop: 'Компьютер',
-  other: 'Другое',
-};
 const ORDERS_GRID_LAYOUT_KEY = 'orders_grid_layout_v1';
+const ORDERS_FILTERS_KEY = 'orders_filters_v1';
 const ordersFilterScopes = ['all', 'active', 'completed', 'cancelled', 'paid'] as const;
 const ordersPeriodPresets: PeriodPreset[] = ['all', 'today', 'week', 'month', 'quarter', 'year'];
 
-type PriceListItem = {
-  id: string;
-  deviceType: string;
-  model: string;
-  workName: string;
-  partName: string;
-  partCost: number;
-  workCost: number;
+type OrdersFilterState = {
+  filterScope: typeof ordersFilterScopes[number];
+  filterStatus: string;
+  filterPriority: string;
+  periodFilter: PeriodFilterValue;
 };
 
-const isAllowedPriceListItem = (item: PriceListItem) => {
-  const normalizedWorkName = item.workName.trim().toLowerCase();
-  if (normalizedWorkName.includes('диагност')) {
-    return normalizedWorkName === 'диагностика устройства' || normalizedWorkName === 'диагностика';
-  }
-
-  if (item.id.startsWith('custom_')) {
-    return true;
-  }
-
-  const allowedWorks = priceWorkNamesByType[item.deviceType] || priceWorkNamesByType.other;
-  return allowedWorks.some((workName) => workName.toLowerCase() === normalizedWorkName);
-};
-
-const roundPrice = (value: number, step = 100) => Math.max(0, Math.round(value / step) * step);
-
-const getIphoneGeneration = (model: string) => {
-  const match = model.match(/iphone\s*(\d+)/i);
-  return match ? Number(match[1]) : 0;
-};
-
-const getModelPriceProfile = (deviceType: string, model: string) => {
-  const lowerModel = model.toLowerCase();
-  const isApple = lowerModel.includes('apple') || lowerModel.includes('iphone') || lowerModel.includes('ipad') || lowerModel.includes('mac');
-  const isProMax = /pro max|ultra|fold|xps 17|mac pro|m3 max/i.test(model);
-  const isPro = / pro|plus|\+|max|ultra|fold|flip|xps|spectre|elitebook|thinkpad|rog|raider|predator|alienware/i.test(model);
-  const isBudget = /se|redmi|poco|galaxy a|tab a|c55|a78|y36|inspiron|ideapad|pavilion|aspire/i.test(model);
-  const generation = getIphoneGeneration(model);
-
-  let classFactor = 1;
-  if (isProMax) {
-    classFactor = 1.28;
-  } else if (isPro) {
-    classFactor = 1.14;
-  } else if (isBudget) {
-    classFactor = 0.78;
-  }
-
-  if (deviceType === 'tablet') {
-    classFactor *= 1.18;
-  }
-  if (deviceType === 'laptop') {
-    classFactor *= 1.75;
-  }
-  if (deviceType === 'desktop') {
-    classFactor *= 1.55;
-  }
-
-  let ageFactor = 1;
-  if (generation >= 15) {
-    ageFactor = 1.18;
-  } else if (generation === 14) {
-    ageFactor = 1.06;
-  } else if (generation === 13) {
-    ageFactor = 0.96;
-  } else if (generation === 12) {
-    ageFactor = 0.86;
-  } else if (generation > 0 && generation <= 11) {
-    ageFactor = 0.72;
-  }
-
-  const brandFactor = isApple ? 1.2 : lowerModel.includes('samsung') ? 1.08 : 0.92;
-  return {
-    partFactor: classFactor * ageFactor * brandFactor,
-    workFactor: Math.max(0.85, Math.min(1.45, classFactor * (deviceType === 'phone' ? 1 : 1.08))),
-  };
-};
-
-const getPhoneScreenBase = (model: string, isOriginal: boolean) => {
-  const generation = getIphoneGeneration(model);
-  const lowerModel = model.toLowerCase();
-  if (generation >= 15) return isOriginal ? 31900 : 17900;
-  if (generation === 14) return isOriginal ? 27900 : 15900;
-  if (generation === 13) return isOriginal ? 23900 : 13900;
-  if (generation === 12) return isOriginal ? 19900 : 10900;
-  if (generation > 0) return isOriginal ? 13900 : 7900;
-  if (lowerModel.includes('fold')) return isOriginal ? 34900 : 22900;
-  if (lowerModel.includes('flip')) return isOriginal ? 24900 : 16900;
-  if (lowerModel.includes('ultra')) return isOriginal ? 22900 : 13900;
-  return isOriginal ? 15900 : 8900;
-};
-
-const splitTotalPrice = (total: number, workCost: number) => ({
-  partCost: Math.max(0, roundPrice(total - workCost)),
-  workCost: roundPrice(workCost),
+const defaultOrdersFilters = (): OrdersFilterState => ({
+  filterScope: 'active',
+  filterStatus: 'all',
+  filterPriority: 'all',
+  periodFilter: defaultPeriodFilterValue('all'),
 });
 
-const getDefaultPriceByWork = (workName: string, deviceType: string, model: string) => {
-  const normalized = workName.toLowerCase();
-  const profile = getModelPriceProfile(deviceType, model);
-
-  if ((normalized.includes('экран') || normalized.includes('дисплей')) && normalized.includes('оригинал')) {
-    const total = deviceType === 'phone'
-      ? getPhoneScreenBase(model, true)
-      : roundPrice(16500 * profile.partFactor);
-    return splitTotalPrice(total, 3500 * profile.workFactor);
-  }
-  if ((normalized.includes('экран') || normalized.includes('дисплей')) && normalized.includes('копия')) {
-    const total = deviceType === 'phone'
-      ? getPhoneScreenBase(model, false)
-      : roundPrice(9800 * profile.partFactor);
-    return splitTotalPrice(total, 3200 * profile.workFactor);
-  }
-  if ((normalized.includes('батар') || normalized.includes('аккумулятор')) && normalized.includes('оригинал')) {
-    const total = roundPrice((deviceType === 'laptop' ? 10500 : deviceType === 'tablet' ? 7900 : 6900) * profile.partFactor);
-    return splitTotalPrice(total, 1900 * profile.workFactor);
-  }
-  if ((normalized.includes('батар') || normalized.includes('аккумулятор')) && normalized.includes('копия')) {
-    const total = roundPrice((deviceType === 'laptop' ? 7600 : deviceType === 'tablet' ? 5900 : 5200) * profile.partFactor);
-    return splitTotalPrice(total, 1700 * profile.workFactor);
-  }
-  if (normalized.includes('экран') || normalized.includes('дисплей')) {
-    return splitTotalPrice(roundPrice(11900 * profile.partFactor), 3200 * profile.workFactor);
-  }
-  if (normalized.includes('батар') || normalized.includes('аккумулятор')) {
-    return splitTotalPrice(roundPrice(4900 * profile.partFactor), 1700 * profile.workFactor);
-  }
-  if (normalized.includes('разъема зарядки') || normalized.includes('нижнего шлейфа')) {
-    return { partCost: roundPrice(1800 * profile.partFactor), workCost: roundPrice(2300 * profile.workFactor) };
-  }
-  if (normalized.includes('камер')) {
-    return { partCost: roundPrice(3500 * profile.partFactor), workCost: roundPrice(2400 * profile.workFactor) };
-  }
-  if (normalized.includes('динамик') || normalized.includes('микрофон')) {
-    return { partCost: roundPrice(1400 * profile.partFactor), workCost: roundPrice(1900 * profile.workFactor) };
-  }
-  if (normalized.includes('кнопк')) {
-    return { partCost: roundPrice(1300 * profile.partFactor), workCost: roundPrice(2100 * profile.workFactor) };
-  }
-  if (normalized.includes('материнск') || normalized.includes('плат')) {
-    return { partCost: roundPrice(8500 * profile.partFactor), workCost: roundPrice(5500 * profile.workFactor) };
-  }
-  if (normalized.includes('корпус') || normalized.includes('крышк')) {
-    return { partCost: roundPrice(4200 * profile.partFactor), workCost: roundPrice(3500 * profile.workFactor) };
-  }
-  if (normalized.includes('чист')) return { partCost: 0, workCost: roundPrice(1200 * profile.workFactor) };
-  if (normalized.includes('стекл') || normalized.includes('пленк')) {
-    return { partCost: roundPrice(900 * profile.partFactor), workCost: roundPrice(900 * profile.workFactor) };
-  }
-  if (normalized.includes('прошив') || normalized.includes('систем') || normalized.includes('настрой')) {
-    return { partCost: 0, workCost: roundPrice(1800 * profile.workFactor) };
-  }
-  if (normalized.includes('данн')) return { partCost: 0, workCost: roundPrice(3500 * profile.workFactor) };
-  if (normalized.includes('вод') || normalized.includes('паден') || normalized.includes('механическ')) {
-    return { partCost: roundPrice(2500 * profile.partFactor), workCost: roundPrice(4500 * profile.workFactor) };
-  }
-  if (normalized.includes('диагност')) return { partCost: 0, workCost: 0 };
-
-  return { partCost: 0, workCost: roundPrice(1800 * profile.workFactor) };
-};
-
-const createDefaultPriceList = (): PriceListItem[] =>
-  Object.entries(deviceModelsByType).flatMap(([deviceType, models]) =>
-    models.flatMap((model) =>
-      (priceWorkNamesByType[deviceType] || priceWorkNamesByType.other).map((workName) => {
-        const defaultPrice = getDefaultPriceByWork(workName, deviceType, model);
-        return {
-          id: `${deviceType}_${model}_${workName}`.replace(/\s+/g, '_').toLowerCase(),
-          deviceType,
-          model,
-          workName,
-          partName: defaultPrice.partCost > 0 ? workName : '',
-          partCost: defaultPrice.partCost,
-          workCost: defaultPrice.workCost,
-        };
-      })
-    )
-  );
-
-const getSavedPriceList = () => {
+const loadOrdersFilters = (): OrdersFilterState => {
+  const fallback = defaultOrdersFilters();
+  if (typeof window === 'undefined') return fallback;
   try {
-    const saved = JSON.parse(localStorage.getItem(priceListStorageKey) || '[]');
-    if (!Array.isArray(saved) || saved.length === 0) {
-      return createDefaultPriceList();
-    }
-
-    const savedAllowed = (saved as PriceListItem[]).filter(isAllowedPriceListItem);
-    const savedKeys = new Set(
-      savedAllowed.map((item) => `${item.deviceType}|${item.model}|${item.workName}`.toLowerCase())
-    );
-    const missingDefaults = createDefaultPriceList().filter(
-      (item) => !savedKeys.has(`${item.deviceType}|${item.model}|${item.workName}`.toLowerCase())
-    );
-
-    return [...savedAllowed, ...missingDefaults];
+    const raw = window.localStorage.getItem(ORDERS_FILTERS_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<OrdersFilterState>;
+    const scope = ordersFilterScopes.includes(parsed.filterScope as typeof ordersFilterScopes[number])
+      ? (parsed.filterScope as typeof ordersFilterScopes[number])
+      : fallback.filterScope;
+    const status = typeof parsed.filterStatus === 'string' ? parsed.filterStatus : fallback.filterStatus;
+    const priority = typeof parsed.filterPriority === 'string' ? parsed.filterPriority : fallback.filterPriority;
+    const period = parsed.periodFilter
+      && typeof parsed.periodFilter === 'object'
+      && typeof parsed.periodFilter.preset === 'string'
+      && (ordersPeriodPresets as readonly string[]).includes(parsed.periodFilter.preset)
+      ? {
+          preset: parsed.periodFilter.preset as PeriodPreset,
+          from: typeof parsed.periodFilter.from === 'string' ? parsed.periodFilter.from : '',
+          to: typeof parsed.periodFilter.to === 'string' ? parsed.periodFilter.to : '',
+        }
+      : fallback.periodFilter;
+    return { filterScope: scope, filterStatus: status, filterPriority: priority, periodFilter: period };
   } catch {
-    return createDefaultPriceList();
+    return fallback;
   }
 };
 
-const getPriceBrand = (model: string) => model.trim().split(/\s+/)[0] || 'Без бренда';
-
-const normalizePriceSearchText = (value: string) =>
-  value
-    .toLowerCase()
-    .replace(/ё/g, 'е')
-    .replace(/[^a-zа-я0-9]+/gi, ' ')
-    .trim();
-
-const priceSearchAliases: Record<string, string[]> = {
-  акб: ['акб', 'аккумулятор', 'батарея', 'батареи', 'батар'],
-  аккум: ['аккумулятор', 'батарея', 'батареи', 'батар'],
-  аккумулятор: ['аккумулятор', 'батарея', 'батареи', 'батар'],
-  батарея: ['аккумулятор', 'батарея', 'батареи', 'батар'],
-  батареи: ['аккумулятор', 'батарея', 'батареи', 'батар'],
-  раз: ['раз', 'разъем', 'разъема', 'разьем', 'разьема', 'нижний', 'шлейф', 'заряд', 'зарядки'],
-  разъем: ['разъем', 'разъема', 'разьем', 'разьема', 'нижний', 'шлейф', 'заряд', 'зарядки'],
-  разьем: ['разъем', 'разъема', 'разьем', 'разьема', 'нижний', 'шлейф', 'заряд', 'зарядки'],
-  зарядка: ['разъем', 'разъема', 'разьем', 'разьема', 'заряд', 'зарядки'],
-  зарядки: ['разъем', 'разъема', 'разьем', 'разьема', 'заряд', 'зарядки'],
-  шлейф: ['шлейф', 'нижний', 'разъем', 'разъема', 'заряд', 'зарядки'],
-  экран: ['экран', 'дисп', 'дисплей', 'модуль'],
-  дисп: ['экран', 'дисп', 'дисплей', 'модуль'],
-  дисплей: ['экран', 'дисп', 'дисплей', 'модуль'],
-  стекло: ['стекло', 'защитное', 'пленка'],
-  пленка: ['стекло', 'защитное', 'пленка'],
-};
-
-const getPriceSearchGroups = (query: string) =>
-  normalizePriceSearchText(query)
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((token) => priceSearchAliases[token] || [token]);
-
-const matchesPriceSearch = (item: PriceListItem, query: string) => {
-  const groups = getPriceSearchGroups(query);
-  if (groups.length === 0) {
-    return true;
+const saveOrdersFilters = (state: OrdersFilterState) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(ORDERS_FILTERS_KEY, JSON.stringify(state));
+  } catch {
+    /* quota or disabled storage — ignore */
   }
-
-  const haystack = normalizePriceSearchText(
-    [
-      deviceTypeLabels[item.deviceType] || item.deviceType,
-      getPriceBrand(item.model),
-      item.model,
-      item.workName,
-      item.partName,
-    ].join(' ')
-  );
-
-  return groups.every((group) =>
-    group.some((term) => haystack.includes(normalizePriceSearchText(term)))
-  );
 };
 
 type OrdersColumnLayout = {
@@ -721,6 +346,7 @@ type OrdersColumnLayout = {
 
 const Orders: React.FC = () => {
   const { user } = useAuth();
+  const theme = useTheme();
   const location = useLocation();
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
@@ -735,8 +361,6 @@ const Orders: React.FC = () => {
   const [isCommunicationDialogOpen, setIsCommunicationDialogOpen] = useState(false);
   const [isWarrantyDialogOpen, setIsWarrantyDialogOpen] = useState(false);
   const [isPriceDialogOpen, setIsPriceDialogOpen] = useState(false);
-  const [isPriceEditMode, setIsPriceEditMode] = useState(false);
-  const [isPriceFilterOpen, setIsPriceFilterOpen] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [editingWorkItemId, setEditingWorkItemId] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<AcceptanceAct | WorkCompletionAct | null>(null);
@@ -744,44 +368,93 @@ const Orders: React.FC = () => {
   const [isCreateOrderFormOpen, setIsCreateOrderFormOpen] = useState(false);
   const [isStepByStepOrderOpen, setIsStepByStepOrderOpen] = useState(false);
   const [isQuickSaleDialogOpen, setIsQuickSaleDialogOpen] = useState(false);
-  const [isQuickCleaningDialogOpen, setIsQuickCleaningDialogOpen] = useState(false);
+  const [isQuickWorkDialogOpen, setIsQuickWorkDialogOpen] = useState(false);
   const [activeQuickSaleId, setActiveQuickSaleId] = useState('');
-  const [currentStep, setCurrentStep] = useState(0);
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterScope, setFilterScope] = useState<'all' | 'active' | 'completed' | 'cancelled' | 'paid'>('active');
-  const [filterStatus, setFilterStatus] = useState('all');
-  const [filterPriority, setFilterPriority] = useState('all');
-  const [periodFilter, setPeriodFilter] = useState<PeriodFilterValue>(() => defaultPeriodFilterValue('month'));
-  const [tabValue, setTabValue] = useState(0);
-  const [communicationChannel, setCommunicationChannel] = useState<'whatsapp' | 'telegram'>('whatsapp');
-  const [communicationMessage, setCommunicationMessage] = useState('');
-  const [masterCommentText, setMasterCommentText] = useState('');
-  const [warrantySourceOrderNumber, setWarrantySourceOrderNumber] = useState('');
-  const [isWarrantyCreating, setIsWarrantyCreating] = useState(false);
-  const [priceList, setPriceList] = useState<PriceListItem[]>(getSavedPriceList);
-  const [priceSearch, setPriceSearch] = useState('');
-  const [priceDeviceType, setPriceDeviceType] = useState('all');
-  const [priceBrand, setPriceBrand] = useState('all');
-  const [priceModel, setPriceModel] = useState('all');
-  const [newPriceItem, setNewPriceItem] = useState<PriceListItem>({
-    id: '',
-    deviceType: 'phone',
-    model: '',
-    workName: '',
-    partName: '',
-    partCost: 0,
-    workCost: 0,
-  });
+  const debouncedSearchTerm = useDebouncedValue(searchTerm, 300);
+  const initialFilters = useMemo(loadOrdersFilters, []);
+  const [filterScope, setFilterScope] = useState<'all' | 'active' | 'completed' | 'cancelled' | 'paid'>(initialFilters.filterScope);
+  const [filterStatus, setFilterStatus] = useState(initialFilters.filterStatus);
+  const [filterPriority, setFilterPriority] = useState(initialFilters.filterPriority);
+  const [periodFilter, setPeriodFilter] = useState<PeriodFilterValue>(initialFilters.periodFilter);
 
   useEffect(() => {
+    saveOrdersFilters({ filterScope, filterStatus, filterPriority, periodFilter });
+  }, [filterScope, filterStatus, filterPriority, periodFilter]);
+  const [tabValue, setTabValue] = useState(0);
+  const [communicationChannel, setCommunicationChannel] = useState<'telegram' | 'sms'>('telegram');
+  const [isSendingCommunication, setIsSendingCommunication] = useState(false);
+  const [warrantySourceOrderNumber, setWarrantySourceOrderNumber] = useState('');
+  const [isWarrantyCreating, setIsWarrantyCreating] = useState(false);
+  useEffect(() => {
     const openPriceList = () => setIsPriceDialogOpen(true);
+    const openDataExchange = () => setDataExchangeOpen(true);
     window.addEventListener('crm:open-price-list', openPriceList);
-    return () => window.removeEventListener('crm:open-price-list', openPriceList);
+    window.addEventListener('crm:open-orders-data-exchange', openDataExchange);
+    return () => {
+      window.removeEventListener('crm:open-price-list', openPriceList);
+      window.removeEventListener('crm:open-orders-data-exchange', openDataExchange);
+    };
   }, []);
-  
+
+  useEffect(() => {
+    if ((!isOrderViewDialogOpen && !isCommunicationDialogOpen) || !selectedOrder?.id) {
+      return undefined;
+    }
+
+    const orderId = selectedOrder.id;
+    let lastSignature = '';
+
+    const refreshOrderHistory = async () => {
+      const freshOrder = await orderService.getOrderById(orderId);
+      if (!freshOrder) {
+        return;
+      }
+      const history = freshOrder.communicationHistory || [];
+      const signature = [
+        String(freshOrder.updatedAt || ''),
+        String(freshOrder.status || ''),
+        String(history.length),
+        String(history[history.length - 1]?.id || ''),
+        String(history[history.length - 1]?.message || ''),
+      ].join('|');
+      if (signature === lastSignature) {
+        return;
+      }
+      lastSignature = signature;
+      setSelectedOrder(freshOrder);
+      setOrdersData((prev) => prev.map((order) => (order.id === freshOrder.id ? freshOrder : order)));
+    };
+
+    void refreshOrderHistory();
+
+    const pollMs = isCommunicationDialogOpen ? 10_000 : 25_000;
+    const tick = () => {
+      if (document.hidden) {
+        return;
+      }
+      void refreshOrderHistory();
+    };
+
+    const timer = window.setInterval(tick, pollMs);
+
+    const handleVisibility = () => {
+      if (!document.hidden) {
+        void refreshOrderHistory();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [isOrderViewDialogOpen, isCommunicationDialogOpen, selectedOrder?.id]);
+
   // Add work / part form state
   const [workType, setWorkType] = useState<'work' | 'part'>('work');
-  const [workName, setWorkName] = useState('');
+  const [addWorkInitialForm, setAddWorkInitialForm] = useState<AddWorkFormValues>(emptyAddWorkForm);
+  const [addWorkFormKey, setAddWorkFormKey] = useState(0);
   const [customWorkNames, setCustomWorkNames] = useState<string[]>(() => {
     try {
       const stored = localStorage.getItem(customWorkNamesStorageKey);
@@ -791,26 +464,10 @@ const Orders: React.FC = () => {
       return [];
     }
   });
-  const [customDeviceModels, setCustomDeviceModels] = useState<Record<string, string[]>>(() => {
-    try {
-      const stored = localStorage.getItem(customDeviceModelsStorageKey);
-      const parsed = stored ? JSON.parse(stored) : {};
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-    } catch {
-      return {};
-    }
-  });
-  const [workPrice, setWorkPrice] = useState('');
-  const [workQuantity, setWorkQuantity] = useState(1);
-  const [workWarrantyDays, setWorkWarrantyDays] = useState('30');
   const [partsSearchTerm, setPartsSearchTerm] = useState('');
+  const debouncedPartsSearchTerm = useDebouncedValue(partsSearchTerm, 300);
   const [selectedPart, setSelectedPart] = useState<any>(null);
-  const [quickPartName, setQuickPartName] = useState('');
-  const [quickPartCategory, setQuickPartCategory] = useState('Прочее');
-  const [quickPartBrand, setQuickPartBrand] = useState('');
-  const [quickPartModel, setQuickPartModel] = useState('');
-  const [quickPartWholesalePrice, setQuickPartWholesalePrice] = useState('');
-  const [quickPartQuantity, setQuickPartQuantity] = useState(1);
+  const [quickReceiveInitial, setQuickReceiveInitial] = useState<QuickReceiveFormValues>(emptyQuickReceiveForm());
   const [partsCategoryFilter, setPartsCategoryFilter] = useState('');
   const [partsBrandFilter, setPartsBrandFilter] = useState('');
   const [partsModelFilter, setPartsModelFilter] = useState('');
@@ -821,84 +478,28 @@ const Orders: React.FC = () => {
     paymentMethod: 'cash',
     note: '',
   });
-  const [quickCleaningForm, setQuickCleaningForm] = useState({
-    salePrice: '1000',
-    paymentMethod: 'cash',
-    note: '',
-  });
   
-  // Delivery flow state
-  const [testingChecklist, setTestingChecklist] = useState({
-    screenWorks: false,
-    touchWorks: false,
-    cameraWorks: false,
-    soundWorks: false,
-    chargingWorks: false,
-    wifiWorks: false,
-    bluetoothWorks: false,
-    buttonsWork: false,
-    fingerprintWorks: false,
-    faceIdWorks: false
-  });
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'transfer'>('cash');
-  const [paymentAmount, setPaymentAmount] = useState(0);
-  const [paymentNotes, setPaymentNotes] = useState('');
+  // Delivery flow state moved into OrderDeliveryDialog
   const [quickPaymentMethod, setQuickPaymentMethod] = useState<'cash' | 'card' | 'transfer' | 'installment'>('cash');
   const [quickPaymentAmount, setQuickPaymentAmount] = useState(0);
   const [quickPaymentNotes, setQuickPaymentNotes] = useState('');
-  const [screenProtection, setScreenProtection] = useState(false);
-  const [cleaning, setCleaning] = useState(false);
-  const [protectionPartId, setProtectionPartId] = useState('');
-  const [protectionInstallPrice, setProtectionInstallPrice] = useState<number>(0);
-  const [cleaningServicePrice, setCleaningServicePrice] = useState<number>(0);
+  const [paymentDialogMode, setPaymentDialogMode] = useState<'payment' | 'advance'>('payment');
   
-  // Step-by-step order creation state
-  const [newOrderData, setNewOrderData] = useState({
-    // Step 1: Client
-    clientName: '',
-    clientPhone: '',
-    clientEmail: '',
-    clientAddress: '',
-    clientNotes: '',
-    
-    // Step 2: Device
-    deviceType: 'phone' as 'phone' | 'tablet' | 'laptop' | 'desktop' | 'other',
-    deviceBrand: '',
-    deviceModel: '',
-    deviceSerial: '',
-    deviceImei: '',
-    devicePassword: '',
-    deviceColor: '',
-    deviceCondition: 'good' as 'excellent' | 'good' | 'fair' | 'poor',
-    deviceExternalCondition: '',
-    
-    // Step 3: Issue
-    description: '',
-    diagnosis: '',
-    priority: 'medium' as 'low' | 'medium' | 'high' | 'urgent',
-    
-    // Step 4: Price and timeline
-    estimatedCost: 0,
-    advancePayment: 0,
-    estimatedDays: 1,
-    technicianId: '',
-    technicianName: '',
-    intakeManagerName: '',
-    deliveryManagerName: '',
-    
-    // Extra fields
-    staffComments: '',
-    offerProtection: false,
-    offerCleaning: false,
-  });
-  
-  const [ordersData, setOrdersData] = useState<Order[]>(orders);
+  const [ordersData, setOrdersData] = useState<Order[]>(() => orderService.getCachedOrders());
+  const [dataExchangeOpen, setDataExchangeOpen] = useState(false);
   const [inventoryParts, setInventoryParts] = useState(() => inventoryService.getParts());
   const [taxonomyNodes, setTaxonomyNodes] = useState<TaxonomyNode[]>(() => taxonomyService.getNodes('inventory'));
   const [managerOptions, setManagerOptions] = useState(() => employeeService.getEmployeesByRole('manager'));
   const [technicianOptions, setTechnicianOptions] = useState(() => employeeService.getEmployeesByRole('technician'));
   const [assigneeOptions, setAssigneeOptions] = useState(() => employeeService.getEmployees());
   const [crmSettings, setCrmSettings] = useState(() => appSettingsService.getSettings());
+  const [orderClients, setOrderClients] = useState(() => clientService.getClients());
+  const telegramInbox = useSyncExternalStore(
+    subscribeTelegramInbox,
+    getTelegramInboxSnapshot,
+    () => [] as TelegramInboxItem[]
+  );
+
   const [columnLayout, setColumnLayout] = useState<OrdersColumnLayout>(() => {
     try {
       const raw = localStorage.getItem(ORDERS_GRID_LAYOUT_KEY);
@@ -921,9 +522,6 @@ const Orders: React.FC = () => {
   const [ordersPage, setOrdersPage] = useState(0);
   const [ordersRowsPerPage, setOrdersRowsPerPage] = useState(() => columnLayout.rowsPerPage || 10);
   
-  // User role placeholder (later from auth context)
-  const [userRole] = useState<'employee' | 'client'>('employee'); // default: employee
-
   const orderStatusOptions = React.useMemo(
     () =>
       getEnabledOrderStatuses(crmSettings).map((status) => ({
@@ -974,135 +572,36 @@ const Orders: React.FC = () => {
       .sort((a, b) => a.localeCompare(b, 'ru'));
   }, [ordersData]);
 
-  const deviceModelOptions = React.useMemo(() => {
-    const deviceType = newOrderData.deviceType || 'other';
-    const fromStatic = deviceModelsByType[deviceType] || deviceModelsByType.other;
-    const fromCustom = customDeviceModels[deviceType] || [];
-    return Array.from(new Set([...fromStatic, ...fromCustom]))
-      .sort((a, b) => a.localeCompare(b, 'ru'));
-  }, [customDeviceModels, newOrderData.deviceType]);
-
-  const canEditPriceList = user?.role === 'admin';
-  const priceBrandOptions = React.useMemo(
-    () =>
-      Array.from(
-        new Set(
-          priceList
-            .filter((item) => priceDeviceType === 'all' || item.deviceType === priceDeviceType)
-            .map((item) => getPriceBrand(item.model))
-            .filter(Boolean)
-        )
-      ).sort((a, b) => a.localeCompare(b, 'ru')),
-    [priceDeviceType, priceList]
-  );
-  const priceModelOptions = React.useMemo(
-    () =>
-      Array.from(
-        new Set(
-          priceList
-            .filter((item) => priceDeviceType === 'all' || item.deviceType === priceDeviceType)
-            .filter((item) => priceBrand === 'all' || getPriceBrand(item.model) === priceBrand)
-            .map((item) => item.model)
-            .filter(Boolean)
-        )
-      ).sort((a, b) => a.localeCompare(b, 'ru')),
-    [priceBrand, priceDeviceType, priceList]
-  );
-  const priceTree = React.useMemo(
-    () =>
-      deviceTypes
-        .filter((type) => priceList.some((item) => item.deviceType === type))
-        .map((type) => {
-          const typeItems = priceList.filter((item) => item.deviceType === type);
-          const brands = Array.from(new Set(typeItems.map((item) => getPriceBrand(item.model)))).sort((a, b) =>
-            a.localeCompare(b, 'ru')
-          );
-
-          return {
-            type,
-            total: typeItems.length,
-            brands: brands.map((brand) => {
-              const brandItems = typeItems.filter((item) => getPriceBrand(item.model) === brand);
-              const models = Array.from(new Set(brandItems.map((item) => item.model))).sort((a, b) =>
-                a.localeCompare(b, 'ru')
-              );
-              return { brand, total: brandItems.length, models };
-            }),
-          };
-        }),
-    [priceList]
-  );
-  const filteredPriceList = React.useMemo(() => {
-    return priceList
-      .filter((item) => priceDeviceType === 'all' || item.deviceType === priceDeviceType)
-      .filter((item) => priceBrand === 'all' || getPriceBrand(item.model) === priceBrand)
-      .filter((item) => priceModel === 'all' || item.model === priceModel)
-      .filter((item) => matchesPriceSearch(item, priceSearch))
-      .slice(0, 250);
-  }, [priceBrand, priceDeviceType, priceList, priceModel, priceSearch]);
-
-  const persistPriceList = (nextPriceList: PriceListItem[]) => {
-    setPriceList(nextPriceList);
-    localStorage.setItem(priceListStorageKey, JSON.stringify(nextPriceList));
-  };
-
-  const updatePriceItem = (id: string, updates: Partial<PriceListItem>) => {
-    persistPriceList(priceList.map((item) => (item.id === id ? { ...item, ...updates } : item)));
-  };
-
-  const addPriceItem = () => {
-    if (!newPriceItem.model.trim() || !newPriceItem.workName.trim()) {
-      toast.error('Укажите модель и наименование работы');
-      return;
+  const ensureFullOrder = async (order: Order): Promise<Order> => {
+    const fullOrder = await orderService.getOrderById(order.id);
+    if (!fullOrder) {
+      return order;
     }
-
-    const nextItem = {
-      ...newPriceItem,
-      id: `custom_${Date.now()}`,
-      model: newPriceItem.model.trim(),
-      workName: newPriceItem.workName.trim(),
-      partName: newPriceItem.partName.trim(),
-      partCost: Number(newPriceItem.partCost) || 0,
-      workCost: Number(newPriceItem.workCost) || 0,
-    };
-
-    persistPriceList([nextItem, ...priceList]);
-    setNewPriceItem({
-      id: '',
-      deviceType: 'phone',
-      model: '',
-      workName: '',
-      partName: '',
-      partCost: 0,
-      workCost: 0,
-    });
+    setOrdersData((prev) => mergeOrderInList(prev, fullOrder));
+    return fullOrder;
   };
 
-  const deletePriceItem = (id: string) => {
-    persistPriceList(priceList.filter((item) => item.id !== id));
+  const refreshInventoryCatalog = async () => {
+    await Promise.all([inventoryService.refreshPartsOnly(), taxonomyService.refreshFromApi()]);
+    setInventoryParts(inventoryService.getParts());
+    setTaxonomyNodes(taxonomyService.getNodes('inventory'));
   };
-
-  const closePriceListDialog = () => {
-    setIsPriceDialogOpen(false);
-    setIsPriceEditMode(false);
-    setIsPriceFilterOpen(false);
-  };
-
 
   useEffect(() => {
     const loadOrders = async () => {
-      const savedOrders = await orderService.getOrders();
-      const nextSettings = await appSettingsService.refreshFromApi();
-      await employeeService.refreshFromApi();
-      await inventoryService.refreshFromApi();
-      await taxonomyService.refreshFromApi();
+      const [savedOrders, nextSettings] = await Promise.all([
+        orderService.getOrders({ lite: true }),
+        appSettingsService.refreshFromApi(),
+        employeeService.refreshFromApi(),
+      ]);
+
       setOrdersData(savedOrders);
-      setInventoryParts(inventoryService.getParts());
-      setTaxonomyNodes(taxonomyService.getNodes('inventory'));
+      setCrmSettings(nextSettings);
       setManagerOptions(employeeService.getEmployeesByRole('manager'));
       setTechnicianOptions(employeeService.getEmployeesByRole('technician'));
       setAssigneeOptions(employeeService.getEmployees());
-      setCrmSettings(nextSettings);
+
+      void refreshInventoryCatalog();
     };
 
     loadOrders();
@@ -1125,104 +624,6 @@ const Orders: React.FC = () => {
   const getPriorityOption = (priority: Order['priority']) =>
     priorityOptions.find((option) => option.value === priority) || priorityOptions[1];
 
-  const StatusBadgeSelector = ({
-    value,
-    onChange,
-    stopPropagation = false,
-    fullWidth = false,
-    size = 'small',
-  }: {
-    value: Order['status'];
-    onChange: (nextStatus: Order['status']) => void;
-    stopPropagation?: boolean;
-    fullWidth?: boolean;
-    size?: 'small' | 'medium';
-  }) => {
-    const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
-    const selectedOption = getStatusOption(value);
-
-    const handleOpen = (event: React.MouseEvent<HTMLElement>) => {
-      if (stopPropagation) {
-        event.stopPropagation();
-      }
-      setAnchorEl(event.currentTarget);
-    };
-
-    const handleClose = () => {
-      setAnchorEl(null);
-    };
-
-    const handleSelect = (nextStatus: Order['status']) => {
-      handleClose();
-      onChange(nextStatus);
-    };
-
-    return (
-      <>
-        <Chip
-          label={selectedOption.label}
-          clickable
-          onClick={handleOpen}
-          size={size}
-          sx={{
-            width: fullWidth ? '100%' : 'auto',
-            minWidth: fullWidth ? 150 : 132,
-            maxWidth: '100%',
-            justifyContent: 'center',
-            bgcolor: selectedOption.color,
-            color: '#fff',
-            fontWeight: 700,
-            borderRadius: 1.5,
-            '& .MuiChip-label': {
-              display: 'block',
-              width: '100%',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              textAlign: 'center',
-              px: 1.5,
-            },
-            '&:hover': {
-              bgcolor: selectedOption.color,
-              filter: 'brightness(0.96)',
-            },
-          }}
-        />
-        <Menu
-          anchorEl={anchorEl}
-          open={Boolean(anchorEl)}
-          onClose={handleClose}
-          onClick={(event) => {
-            if (stopPropagation) {
-              event.stopPropagation();
-            }
-          }}
-        >
-          {orderStatusOptions.map((option) => (
-            <MenuItem
-              key={option.value}
-              selected={option.value === value}
-              onClick={() => handleSelect(option.value as Order['status'])}
-              sx={{ minWidth: 220 }}
-            >
-              <Chip
-                label={option.label}
-                size="small"
-                sx={{
-                  bgcolor: option.color,
-                  color: '#fff',
-                  fontWeight: 700,
-                  minWidth: 140,
-                  justifyContent: 'center',
-                }}
-              />
-            </MenuItem>
-          ))}
-        </Menu>
-      </>
-    );
-  };
-
   const createHistoryEntry = (
     channel: OrderCommunicationEntry['channel'],
     message: string
@@ -1239,13 +640,85 @@ const Orders: React.FC = () => {
     communicationHistory: [...(order.communicationHistory || []), ...entries],
   });
 
-  const getHistoryChannelLabel = (channel: string) => {
+  const isClientCommunicationEntry = (entry: OrderCommunicationEntry) =>
+    entry.channel === 'whatsapp' || entry.channel === 'telegram' || entry.channel === 'sms';
+
+  const getClientCommunicationHistory = (order: Order) =>
+    (order.communicationHistory || []).filter(isClientCommunicationEntry);
+
+  const getOrderInternalHistory = (order: Order) =>
+    (order.communicationHistory || []).filter((entry) => !isClientCommunicationEntry(entry));
+
+  const getChannelCommunicationHistory = (order: Order, channel: 'telegram' | 'sms') =>
+    getClientCommunicationHistory(order).filter((entry) => entry.channel === channel);
+
+  const isInboundCommunicationEntry = (entry: OrderCommunicationEntry) =>
+    entry.direction === 'inbound' ||
+    (entry.message || '').startsWith('Входящая SMS') ||
+    (entry.message || '').startsWith('Входящее Telegram');
+
+  const formatCommunicationBubbleText = (entry: OrderCommunicationEntry) => {
+    const text = entry.message || '';
+    const textMarker = 'Текст: ';
+    if (text.includes(textMarker)) {
+      return text.slice(text.indexOf(textMarker) + textMarker.length).trim();
+    }
+    const prefixes = [
+      'Исходящее Telegram: ',
+      'Входящее Telegram: ',
+      'Telegram: ',
+      'WhatsApp: ',
+    ];
+    for (const prefix of prefixes) {
+      if (text.startsWith(prefix)) {
+        return text.slice(prefix.length).trim();
+      }
+    }
+    if (text.startsWith('Входящая SMS с ')) {
+      const idx = text.indexOf(': ');
+      return idx >= 0 ? text.slice(idx + 2).trim() : text;
+    }
+    if (text.startsWith('Исходящая SMS на ')) {
+      const idx = text.lastIndexOf(': ');
+      return idx >= 0 ? text.slice(idx + 2).trim() : text;
+    }
+    return text;
+  };
+
+  const getClientInitials = (name?: string) => {
+    const parts = (name || 'К').trim().split(/\s+/).filter(Boolean);
+    return parts
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() || '')
+      .join('') || 'К';
+  };
+
+  const chatMessagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isCommunicationDialogOpen) {
+      return;
+    }
+    chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [
+    isCommunicationDialogOpen,
+    selectedOrder?.communicationHistory,
+    communicationChannel,
+  ]);
+
+  const getHistoryChannelLabel = (channel: string, entry?: OrderCommunicationEntry) => {
     switch (channel) {
       case 'whatsapp':
         return 'WhatsApp';
       case 'telegram':
+        if (entry?.direction === 'inbound' || (entry?.message || '').startsWith('Входящее Telegram')) {
+          return 'Telegram от клиента';
+        }
         return 'Telegram';
       case 'sms':
+        if (entry?.direction === 'inbound' || (entry?.message || '').startsWith('Входящая SMS')) {
+          return 'SMS от клиента';
+        }
         return 'SMS';
       case 'internal':
         return 'Комментарий мастеру';
@@ -1318,55 +791,23 @@ const Orders: React.FC = () => {
   const getOrderEarningsBreakdown = (order: Order) => {
     const baseAmount = getOrderMarginBase(order);
     const { technicianRate, intakeRate, deliveryRate } = getOrderRoleRates(order);
+    const hasTechnician = Boolean(order.technicianId || (order.technicianName || '').trim());
+    const hasIntake = Boolean((order.intakeManagerName || '').trim());
+    const hasDelivery = Boolean((order.deliveryManagerName || '').trim());
 
     return {
       baseAmount,
-      technicianAmount: (baseAmount * technicianRate) / 100,
-      intakeAmount: (baseAmount * intakeRate) / 100,
-      deliveryAmount: (baseAmount * deliveryRate) / 100,
-      technicianRate,
-      intakeRate,
-      deliveryRate,
+      technicianAmount: hasTechnician ? (baseAmount * technicianRate) / 100 : 0,
+      intakeAmount: hasIntake ? (baseAmount * intakeRate) / 100 : 0,
+      deliveryAmount: hasDelivery ? (baseAmount * deliveryRate) / 100 : 0,
+      technicianRate: hasTechnician ? technicianRate : 0,
+      intakeRate: hasIntake ? intakeRate : 0,
+      deliveryRate: hasDelivery ? deliveryRate : 0,
     };
   };
 
-  const notifyClientOnStatusChange = async (order: Order, previousStatus?: Order['status']) => {
-    if (order.status === previousStatus) {
-      return null;
-    }
-
-    try {
-      const settings = appSettingsService.getSettings();
-      const result = await smsService.sendStatusSms(order, settings, getOrderDebt(order));
-
-      if (result.success) {
-        toast.success('Клиенту отправлена SMS по статусу заказа');
-        return createHistoryEntry(
-          'sms',
-          `SMS отправлена клиенту: статус "${getStatusOption(order.status).label}".`
-        );
-      } else if (!result.skipped) {
-        toast.error(result.message);
-        return createHistoryEntry(
-          'sms',
-          `Ошибка отправки SMS: ${result.message}`
-        );
-      } else if (settings.notifications.smsNotifications) {
-        toast(result.message);
-        return createHistoryEntry(
-          'sms',
-          `SMS не отправлена: ${result.message}`
-        );
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Не удалось отправить SMS клиенту');
-      return createHistoryEntry(
-        'sms',
-        `Ошибка отправки SMS: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}`
-      );
-    }
-
-    return null;
+  const notifyOrderCreationSms = (createdOrder: Order) => {
+    notifyAutoStatusSmsToasts(createdOrder, Date.now() - 15000);
   };
 
   const persistOrderChanges = async (
@@ -1374,17 +815,18 @@ const Orders: React.FC = () => {
     updatedOrder: Order,
     successMessage: string
   ) => {
-      await orderService.updateOrder(baseOrder.id, updatedOrder);
-      let finalOrder = updatedOrder;
-      const smsHistoryEntry = await notifyClientOnStatusChange(updatedOrder, baseOrder.status);
-      if (smsHistoryEntry) {
-        finalOrder = appendOrderHistory(updatedOrder, [smsHistoryEntry]);
-        await orderService.updateOrder(baseOrder.id, finalOrder);
-      }
-      setOrdersData((prev) => prev.map((order) => (order.id === baseOrder.id ? finalOrder : order)));
-      setSelectedOrder((prev) => (prev && prev.id === baseOrder.id ? finalOrder : prev));
-      toast.success(successMessage);
-    };
+    const smsSinceMs = Date.now() - 15000;
+    const statusChanged =
+      updatedOrder.status !== undefined && updatedOrder.status !== baseOrder.status;
+    const savedOrder = await orderService.updateOrder(baseOrder.id, updatedOrder);
+    if (statusChanged) {
+      notifyAutoStatusSmsToasts(savedOrder, smsSinceMs);
+    }
+    setOrdersData((prev) => prev.map((order) => (order.id === baseOrder.id ? savedOrder : order)));
+    setSelectedOrder((prev) => (prev && prev.id === baseOrder.id ? savedOrder : prev));
+    void syncOrderDocumentsQuiet(savedOrder);
+    toast.success(successMessage);
+  };
 
   const handleQuickOrderUpdate = async (changes: Partial<Order>) => {
     if (!selectedOrder) return;
@@ -1450,14 +892,6 @@ const Orders: React.FC = () => {
     }
   };
 
-  const buildCommunicationTemplate = (
-    order: Order,
-    channel: 'whatsapp' | 'telegram'
-  ) => {
-    const greeting = channel === 'whatsapp' ? 'Здравствуйте' : 'Добрый день';
-    return `${greeting}, ${order.clientName || 'клиент'}! По заказу ${order.orderNumber}: статус "${getStatusOption(order.status).label}". Ориентировочная стоимость ${getOrderTotal(order)} ₽. Если удобно, ответьте в этом чате.`;
-  };
-
   const buildIntegrationLink = (
     template: string,
     order: Order,
@@ -1467,95 +901,97 @@ const Orders: React.FC = () => {
     const phoneDigits = phone.replace(/[^\d]/g, '');
     const siteUrl = window.location.origin;
     const device = [order.deviceBrand, order.deviceModel].filter(Boolean).join(' ');
+    const botUsername = crmSettings.integrations.telegramBotUsername?.replace(/^@/, '') || '';
+    const telegramStartSuffix = phoneDigits.length > 10 ? phoneDigits.slice(-10) : phoneDigits;
+    const telegramStartParam = telegramStartSuffix ? `link_${telegramStartSuffix}` : '';
+    const telegramBotLink = botUsername
+      ? telegramStartParam
+        ? `https://t.me/${botUsername}?start=${telegramStartParam}`
+        : `https://t.me/${botUsername}`
+      : '';
 
     return template
       .replaceAll('{{phone}}', phone)
       .replaceAll('{{phoneDigits}}', phoneDigits)
       .replaceAll('{{message}}', message)
       .replaceAll('{{messageEncoded}}', encodeURIComponent(message))
-      .replaceAll('{{clientName}}', order.clientName || '')
-      .replaceAll('{{orderNumber}}', order.orderNumber || '')
-      .replaceAll('{{device}}', device)
+      .replaceAll('{{telegramBotLink}}', telegramBotLink)
+      .replaceAll('{{telegramStartParam}}', telegramStartParam)
+      .replaceAll('{{ФИОКлиента}}', order.clientName || '')
+      .replaceAll('{{НомерЗаказа}}', order.orderNumber || '')
+      .replaceAll('{{Устройство}}', device)
       .replaceAll('{{siteUrl}}', siteUrl)
       .replaceAll('{{siteUrlEncoded}}', encodeURIComponent(siteUrl))
-      .replaceAll('{{companyPhone}}', appSettingsService.getSettings().business.phone || '');
+      .replaceAll('{{ТелефонКомпании}}', appSettingsService.getSettings().business.phone || '');
   };
 
-  const getExternalMessengerLink = (
-    order: Order,
-    channel: 'whatsapp' | 'telegram',
-    message: string
-  ) => {
+  const getExternalTelegramLink = (order: Order, message: string) => {
     const settings = appSettingsService.getSettings();
-    if (channel === 'whatsapp') {
-      if (settings.integrations.whatsappMode === 'crm') {
-        return '';
-      }
-      return buildIntegrationLink(settings.integrations.whatsappLinkTemplate, order, message);
-    }
-
     if (settings.integrations.telegramMode === 'crm') {
       return '';
     }
-
     return buildIntegrationLink(settings.integrations.telegramLinkTemplate, order, message);
   };
 
-  const openExternalMessenger = (
-    order: Order,
-    channel: 'whatsapp' | 'telegram',
-    message: string
-  ) => {
-    const link = getExternalMessengerLink(order, channel, message);
+  const openExternalTelegram = (order: Order, message: string) => {
+    const link = getExternalTelegramLink(order, message);
     if (!link) {
-      toast.error(channel === 'whatsapp' ? 'Внешний WhatsApp не настроен' : 'Внешний Telegram не настроен');
+      toast.error('Внешний Telegram не настроен');
       return;
     }
     window.open(link, '_blank', 'noopener,noreferrer');
   };
 
-  const getExternalMessengerLabel = (channel: 'whatsapp' | 'telegram') =>
-    channel === 'whatsapp' ? 'Открыть в WhatsApp' : 'Открыть в Telegram';
+  const getClientTelegramChatId = (order: Order): string => {
+    if (!order.clientId) {
+      return '';
+    }
+    const client = clientService.getClients().find((item) => item.id === order.clientId);
+    return client?.telegramChatId?.trim() || '';
+  };
+
+  const getTelegramBotLink = (order: Order): string => {
+    const username = crmSettings.integrations.telegramBotUsername?.replace(/^@/, '') || '';
+    if (!username) {
+      return '';
+    }
+    const digits = (order.clientPhone || '').replace(/\D/g, '');
+    const suffix = digits.length > 10 ? digits.slice(-10) : digits;
+    if (!suffix) {
+      return `https://t.me/${username}`;
+    }
+    return `https://t.me/${username}?start=link_${suffix}`;
+  };
+
+  const copyTelegramBotLink = async (order: Order) => {
+    const link = getTelegramBotLink(order);
+    if (!link) {
+      toast.error('Подключите Telegram-бота в настройках');
+      return;
+    }
+    const { copyTextToClipboard, shareTextOrLink } = await import('../../utils/clipboard');
+    if (await copyTextToClipboard(link)) {
+      toast.success('Ссылка скопирована');
+      return;
+    }
+    if (await shareTextOrLink(link, 'Ссылка на Telegram-бота')) {
+      return;
+    }
+    toast.error('Удержите ссылку ниже и выберите «Копировать»');
+  };
 
   const handleCreateOrder = () => {
+    void clientService.refreshFromApi().then(() => {
+      setOrderClients(clientService.getClients());
+    });
     setIsCreateOrderFormOpen(true);
   };
 
   const handleCreateStepByStepOrder = () => {
-    setIsStepByStepOrderOpen(true);
-    setCurrentStep(0);
-    setNewOrderData({
-      clientName: '',
-      clientPhone: '',
-      clientEmail: '',
-      clientAddress: '',
-      clientNotes: '',
-      deviceType: 'phone',
-      deviceBrand: '',
-      deviceModel: '',
-      deviceSerial: '',
-      deviceImei: '',
-      devicePassword: '',
-      deviceColor: '',
-      deviceCondition: 'good',
-      deviceExternalCondition: 'Сколы, трещины, возможны скрытые дефекты',
-      description: '',
-      diagnosis: '',
-      priority: 'medium',
-      estimatedCost: 0,
-      advancePayment: 0,
-      estimatedDays: 1,
-        technicianId: assigneeOptions[0]?.id || technicianOptions[0]?.id || '',
-        technicianName: assigneeOptions[0]?.name || technicianOptions[0]?.name || '',
-        intakeManagerName: assigneeOptions[0]?.name || managerOptions[0]?.name || '',
-        deliveryManagerName: assigneeOptions[0]?.name || managerOptions[0]?.name || '',
-      staffComments: '',
-      offerProtection: false,
-      offerCleaning: false,
+    void clientService.refreshFromApi().then(() => {
+      setOrderClients(clientService.getClients());
     });
-    setProtectionPartId('');
-    setProtectionInstallPrice(0);
-    setCleaningServicePrice(0);
+    setIsStepByStepOrderOpen(true);
   };
 
   const handleCreateConfiguredOrder = () => {
@@ -1629,6 +1065,7 @@ const Orders: React.FC = () => {
         payments: [],
         completedAt: undefined,
         isPaid: false,
+        isWarranty: true,
         clientName: sourceOrder.clientName || '',
         clientPhone: normalizePhoneForStorage(sourceOrder.clientPhone || ''),
         deviceBrand: sourceOrder.deviceBrand || '',
@@ -1650,6 +1087,7 @@ const Orders: React.FC = () => {
         ],
       });
 
+      notifyOrderCreationSms(warrantyOrder);
       setOrdersData((prev) => [warrantyOrder, ...prev]);
 
       await handleCreateAcceptanceAct(warrantyOrder, undefined, device, {
@@ -1684,52 +1122,153 @@ const Orders: React.FC = () => {
     setIsQuickSaleDialogOpen(true);
   };
 
-  const openQuickCleaningDialog = () => {
-    const firstPaymentMethod =
-      crmSettings.payment.paymentMethodOptions.find((item) => item.enabled)?.code || 'cash';
-    setQuickCleaningForm({
-      salePrice: '1000',
-      paymentMethod: firstPaymentMethod,
-      note: '',
-    });
-    setIsQuickCleaningDialogOpen(true);
+  const inferBrandFallback = (model: string) => {
+    const value = model.toLowerCase();
+    if (value.includes('iphone') || value.includes('apple')) return 'Apple';
+    if (value.includes('samsung') || value.includes('galaxy')) return 'Samsung';
+    if (value.includes('xiaomi') || value.includes('redmi') || value.includes('poco')) return 'Xiaomi';
+    if (value.includes('huawei')) return 'Huawei';
+    if (value.includes('honor')) return 'Honor';
+    return '';
   };
 
-  const handleCreateQuickCleaning = async () => {
+  const handleCreateQuickWork = async (values: QuickWorkFormValues) => {
     try {
-      const salePrice = Math.max(0, Number(quickCleaningForm.salePrice) || 0);
+      const workName = values.workName.trim();
+      const model = values.model.trim();
+      const salePrice = Math.max(0, Number(values.salePrice) || 0);
+      const quantity = Math.max(1, Number(values.quantity) || 1);
+      const unitPrice = salePrice > 0 ? Math.round((salePrice / quantity) * 100) / 100 : 0;
+      const totalPrice = unitPrice * quantity;
 
-      if (salePrice <= 0) {
-        toast.error('Укажите цену чистки устройства');
+      if (!model) {
+        toast.error('Укажите модель устройства');
+        return;
+      }
+      if (!workName) {
+        toast.error('Выберите работу');
         return;
       }
 
+      const clientName = values.clientName.trim() || 'Быстрая работа';
+      const clientPhone = normalizePhoneForStorage(values.clientPhone.trim() || '70000000000');
+      const clientType = getDefaultClientType(crmSettings);
+
+      await clientService.refreshFromApi();
+      const existingClient = clientService.findClientByPhone(clientPhone);
+      const clientPayload = buildClientPayloadFromFields({
+        settings: crmSettings,
+        clientType,
+        fieldValues: {},
+        firstName: clientName.split(' ')[0] || clientName,
+        lastName: clientName.split(' ').slice(1).join(' ') || '',
+        phone: clientPhone,
+        existingClient,
+      });
+      const client = existingClient
+        ? (await clientService.updateClient(existingClient.id, clientPayload)) || existingClient
+        : await clientService.createClient(clientPayload);
+
+      const device = await orderService.createDevice({
+        type: values.deviceType,
+        brand: values.brand.trim() || inferBrandFallback(model),
+        model,
+        serialNumber: '',
+        imei: '',
+        color: values.color.trim(),
+        condition: 'good',
+        externalCondition: '',
+        clientId: client.id,
+      });
+
+      const workLine = {
+        id: `line_quick_work_${Date.now()}`,
+        partId: `work_quick_${Date.now()}`,
+        quantity,
+        unitPrice,
+        totalPrice,
+        isUsed: true,
+        workType: 'work_only',
+        workName,
+      };
+
       const paymentOption = crmSettings.payment.paymentMethodOptions.find(
-        (item) => item.code === quickCleaningForm.paymentMethod
+        (item) => item.code === values.paymentMethod
       );
+      const payments =
+        totalPrice > 0
+          ? [
+              {
+                id: `pay_quick_work_${Date.now()}`,
+                amount: totalPrice,
+                method: values.paymentMethod,
+                status: 'completed' as const,
+                processedAt: new Date().toISOString(),
+                processedBy: user?.name || 'Сотрудник',
+              },
+            ]
+          : [];
 
-      await cashService.addOperation({
-        type: 'income',
-        amount: salePrice,
-        description: 'Чистка устройства',
-        category: 'Быстрые продажи',
-        paymentMethod: quickCleaningForm.paymentMethod,
-        registerType: paymentOption?.registerType || 'cashbox',
-        source: 'other',
-        processedBy: user?.name || 'Сотрудник',
-        notes: quickCleaningForm.note.trim() || undefined,
+      const order = await orderService.createOrder({
+        clientId: client.id,
+        deviceId: device.id,
+        technicianId: '',
+        technicianName: '',
+        intakeManagerName: user?.name || 'Сотрудник',
+        deliveryManagerName: '',
+        status: defaultOpenStatusCode,
+        priority: 'medium',
+        description: workName,
+        diagnosis: values.note.trim(),
+        estimatedCost: totalPrice,
+        estimatedDays: 1,
+        parts: [workLine as any],
+        payments: payments as any,
+        isPaid: totalPrice > 0,
+        finalCost: totalPrice,
+        clientName,
+        clientPhone,
+        deviceBrand: values.brand.trim() || device.brand,
+        deviceModel: model,
+        deviceSerial: '',
+        deviceImei: '',
+        devicePassword: '',
+        deviceColor: values.color.trim(),
+        deviceCondition: 'good',
+        deviceExternalCondition: '',
+        communicationHistory: [
+          {
+            id: `${Date.now()}_quick_work`,
+            channel: 'system',
+            author: user?.name || 'Сотрудник',
+            message: `Заказ создан через «Быстрая работа»: ${workName}.`,
+            createdAt: new Date().toISOString(),
+          },
+        ],
       });
 
-      setIsQuickCleaningDialogOpen(false);
-      setQuickCleaningForm({
-        salePrice: '1000',
-        paymentMethod: paymentOption?.code || 'cash',
-        note: '',
-      });
-      toast.success('Чистка устройства проведена');
+      if (totalPrice > 0) {
+        await cashService.addOperation({
+          type: 'income',
+          amount: totalPrice,
+          description: `Быстрая работа: ${workName}`,
+          category: 'Заказы',
+          paymentMethod: values.paymentMethod,
+          registerType: paymentOption?.registerType || 'cashbox',
+          source: 'order_payment',
+          orderId: order.id,
+          processedBy: user?.name || 'Сотрудник',
+          notes: values.note.trim() || undefined,
+        });
+      }
+
+      setOrdersData((prev) => [order, ...prev]);
+      setIsQuickWorkDialogOpen(false);
+      toast.success(`Заказ ${order.orderNumber || ''} создан`);
+      handleViewOrder(order);
     } catch (error) {
       console.error(error);
-      toast.error(getApiErrorMessage(error, 'Не удалось провести чистку устройства'));
+      toast.error(getApiErrorMessage(error, 'Не удалось создать заказ'));
     }
   };
 
@@ -1750,6 +1289,7 @@ const Orders: React.FC = () => {
           ? 1
           : Math.max(1, Number(quickSaleForm.quantity) || 1);
       const salePrice = Math.max(0, Number(quickSaleForm.salePrice) || 0);
+      const unitPrice = quantity > 0 ? Math.round((salePrice / quantity) * 100) / 100 : salePrice;
 
       if (salePrice <= 0) {
         toast.error('Укажите цену продажи');
@@ -1761,35 +1301,143 @@ const Orders: React.FC = () => {
         return;
       }
 
-      await inventoryService.registerOutgoingMovement(
-        selectedQuickSalePart.id,
+      const saleLabel = activeQuickSaleOption.label;
+      const partName = selectedQuickSalePart.name;
+      const clientType = getDefaultClientType(crmSettings);
+      const anonymousPhone = normalizePhoneForStorage('70000000000');
+
+      await clientService.refreshFromApi();
+      const existingClient = clientService.findClientByPhone(anonymousPhone);
+      const clientPayload = buildClientPayloadFromFields({
+        settings: crmSettings,
+        clientType,
+        fieldValues: {},
+        firstName: 'Без',
+        lastName: 'клиента',
+        phone: anonymousPhone,
+        existingClient,
+      });
+      const client = existingClient
+        ? (await clientService.updateClient(existingClient.id, clientPayload)) || existingClient
+        : await clientService.createClient(clientPayload);
+
+      const deviceModel = (selectedQuickSalePart.model || partName || saleLabel).trim();
+      const device = await orderService.createDevice({
+        type: 'other',
+        brand: (selectedQuickSalePart.brand || '').trim(),
+        model: deviceModel,
+        serialNumber: '',
+        imei: '',
+        color: '',
+        condition: 'good',
+        externalCondition: '',
+        clientId: client.id,
+      });
+
+      const partLine = {
+        id: `line_quick_sale_${Date.now()}`,
+        partId: selectedQuickSalePart.id,
         quantity,
-        `Быстрая продажа: ${activeQuickSaleOption.label} / ${selectedQuickSalePart.name}`,
-        undefined,
-        user?.name || 'Сотрудник'
-      );
+        unitPrice,
+        totalPrice: salePrice,
+        isUsed: true,
+        workType: 'work_with_part',
+        workName: saleLabel,
+        partInfo: {
+          id: selectedQuickSalePart.id,
+          name: partName,
+          brand: selectedQuickSalePart.brand,
+          model: selectedQuickSalePart.model,
+          category: selectedQuickSalePart.category,
+          price: Number(selectedQuickSalePart.unitPrice || 0),
+          stock: Number(selectedQuickSalePart.quantity || 0),
+          partCost:
+            Number(selectedQuickSalePart.wholesalePrice ?? selectedQuickSalePart.unitPrice ?? 0) *
+            quantity,
+          workCost: 0,
+        },
+      };
 
       const paymentOption = crmSettings.payment.paymentMethodOptions.find(
         (item) => item.code === quickSaleForm.paymentMethod
+      );
+      const payments = [
+        {
+          id: `pay_quick_sale_${Date.now()}`,
+          amount: salePrice,
+          method: quickSaleForm.paymentMethod,
+          status: 'completed' as const,
+          processedAt: new Date().toISOString(),
+          processedBy: user?.name || 'Сотрудник',
+        },
+      ];
+
+      const description =
+        quantity > 1 ? `${saleLabel}: ${partName} x${quantity}` : `${saleLabel}: ${partName}`;
+
+      const order = await orderService.createOrder({
+        clientId: client.id,
+        deviceId: device.id,
+        technicianId: '',
+        technicianName: '',
+        intakeManagerName: user?.name || 'Сотрудник',
+        deliveryManagerName: user?.name || 'Сотрудник',
+        status: completedStatusCode || defaultOpenStatusCode,
+        priority: 'medium',
+        description,
+        diagnosis: quickSaleForm.note.trim(),
+        estimatedCost: salePrice,
+        estimatedDays: 1,
+        parts: [partLine as any],
+        payments: payments as any,
+        isPaid: true,
+        finalCost: salePrice,
+        completedAt: new Date().toISOString(),
+        clientName: '',
+        clientPhone: '',
+        deviceBrand: device.brand,
+        deviceModel: deviceModel,
+        deviceSerial: '',
+        deviceImei: '',
+        devicePassword: '',
+        deviceColor: '',
+        deviceCondition: 'good',
+        deviceExternalCondition: '',
+        communicationHistory: [
+          {
+            id: `${Date.now()}_quick_sale`,
+            channel: 'system',
+            author: user?.name || 'Сотрудник',
+            message: `Заказ создан через быструю продажу «${saleLabel}» без ФИО и телефона.`,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      });
+
+      await inventoryService.registerOutgoingMovement(
+        selectedQuickSalePart.id,
+        quantity,
+        `Списание в заказ ${order.orderNumber}: ${description}`,
+        order.orderNumber,
+        user?.name || 'Сотрудник'
       );
 
       await cashService.addOperation({
         type: 'income',
         amount: salePrice,
-        description:
-          quantity > 1
-            ? `${activeQuickSaleOption.label}: ${selectedQuickSalePart.name} x${quantity}`
-            : `${activeQuickSaleOption.label}: ${selectedQuickSalePart.name}`,
-        category: 'Быстрые продажи',
+        description,
+        category: 'Заказы',
         paymentMethod: quickSaleForm.paymentMethod,
         registerType: paymentOption?.registerType || 'cashbox',
-        source: 'other',
+        source: 'order_payment',
+        orderId: order.id,
         processedBy: user?.name || 'Сотрудник',
         notes: quickSaleForm.note.trim() || undefined,
       });
 
       await inventoryService.refreshFromApi();
       setInventoryParts(inventoryService.getParts());
+      setOrdersData((prev) => [order, ...prev]);
       setIsQuickSaleDialogOpen(false);
       setActiveQuickSaleId('');
       setQuickSaleForm({
@@ -1799,63 +1447,20 @@ const Orders: React.FC = () => {
         paymentMethod: paymentOption?.code || 'cash',
         note: '',
       });
-      toast.success(`Продажа "${activeQuickSaleOption.label}" проведена`);
+      toast.success(`Заказ ${order.orderNumber || ''} создан`);
+      handleViewOrder(order);
     } catch (error) {
       console.error(error);
-      toast.error('Не удалось провести быструю продажу');
+      toast.error(getApiErrorMessage(error, 'Не удалось создать заказ'));
     }
   };
 
-  const handleNextStep = () => {
-    if (currentStep === 1) {
-      rememberDeviceModel(newOrderData.deviceType, newOrderData.deviceModel);
-    }
+  const handleCreateOrderFromWizard = async (payload: OrderCreationSubmitPayload) => {
+    const { orderData: newOrderData, protectionPartId, protectionInstallPrice, cleaningServicePrice } = payload;
+    const selectedProtectionPart = newOrderData.offerProtection
+      ? protectionParts.find((part) => part.id === protectionPartId) || null
+      : null;
 
-    if (currentStep < 3) {
-      setCurrentStep(currentStep + 1);
-    }
-  };
-
-  const handlePrevStep = () => {
-    if (currentStep > 0) {
-      setCurrentStep(currentStep - 1);
-    }
-  };
-
-  const handleStepDataChange = (field: string, value: any) => {
-    setNewOrderData(prev => ({ ...prev, [field]: value }));
-  };
-
-  const rememberDeviceModel = React.useCallback((deviceType: string, value: string) => {
-    const normalized = value.trim();
-    if (!normalized) {
-      return;
-    }
-
-    const type = deviceType || 'other';
-    const existsInBase = (deviceModelsByType[type] || []).some(
-      (model) => model.trim().toLowerCase() === normalized.toLowerCase()
-    );
-    if (existsInBase) {
-      return;
-    }
-
-    setCustomDeviceModels((prev) => {
-      const current = prev[type] || [];
-      if (current.some((model) => model.trim().toLowerCase() === normalized.toLowerCase())) {
-        return prev;
-      }
-
-      const next = {
-        ...prev,
-        [type]: [...current, normalized].sort((a, b) => a.localeCompare(b, 'ru')),
-      };
-      localStorage.setItem(customDeviceModelsStorageKey, JSON.stringify(next));
-      return next;
-    });
-  }, []);
-
-  const handleCreateOrderFromSteps = async () => {
     try {
       if (!newOrderData.clientName.trim()) {
         toast.error('Укажите ФИО клиента');
@@ -1865,12 +1470,21 @@ const Orders: React.FC = () => {
         toast.error('Укажите телефон клиента');
         return;
       }
+      const clientFieldError = validateClientFieldsForOrder(
+        crmSettings,
+        newOrderData.clientType,
+        newOrderData.clientFieldValues
+      );
+      if (clientFieldError) {
+        toast.error(clientFieldError);
+        return;
+      }
       if (!newOrderData.deviceModel.trim()) {
         toast.error('Укажите модель устройства');
         return;
       }
-      if (!newOrderData.diagnosis.trim()) {
-        toast.error('Укажите предварительный диагноз');
+      if (!newOrderData.description.trim() && !newOrderData.diagnosis.trim()) {
+        toast.error('Укажите неисправность');
         return;
       }
       if (!newOrderData.estimatedDays || newOrderData.estimatedDays < 1) {
@@ -1878,32 +1492,22 @@ const Orders: React.FC = () => {
         return;
       }
 
-      rememberDeviceModel(newOrderData.deviceType, newOrderData.deviceModel);
       await clientService.refreshFromApi();
-      // Find existing client by phone
-      let client = clientService.findClientByPhone(newOrderData.clientPhone);
-      
-      if (!client) {
-        // Create new client
-        client = await clientService.createClient({
-          firstName: newOrderData.clientName.split(' ')[0] || '',
-          lastName: newOrderData.clientName.split(' ').slice(1).join(' ') || '',
-          phone: normalizePhoneForStorage(newOrderData.clientPhone),
-          email: newOrderData.clientEmail,
-          address: newOrderData.clientAddress,
-          notes: newOrderData.clientNotes,
-        });
-      } else {
-        // Update existing client if data changed
-        client = (await clientService.updateClient(client.id, {
-          firstName: newOrderData.clientName.split(' ')[0] || '',
-          lastName: newOrderData.clientName.split(' ').slice(1).join(' ') || '',
-          phone: normalizePhoneForStorage(newOrderData.clientPhone),
-          email: newOrderData.clientEmail,
-          address: newOrderData.clientAddress,
-          notes: newOrderData.clientNotes,
-        })) || client;
-      }
+      const existingClient = clientService.findClientByPhone(newOrderData.clientPhone);
+      const clientPayload = buildClientPayloadFromFields({
+        settings: crmSettings,
+        clientType: newOrderData.clientType,
+        fieldValues: newOrderData.clientFieldValues,
+        firstName: newOrderData.clientName.split(' ')[0] || '',
+        lastName: newOrderData.clientName.split(' ').slice(1).join(' ') || '',
+        phone: normalizePhoneForStorage(newOrderData.clientPhone),
+        address: newOrderData.clientAddress,
+        existingClient,
+      });
+
+      const client = existingClient
+        ? (await clientService.updateClient(existingClient.id, clientPayload)) || existingClient
+        : await clientService.createClient(clientPayload);
 
       // Create device
       const device = await orderService.createDevice({
@@ -1965,18 +1569,20 @@ const Orders: React.FC = () => {
           ? initialParts.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0)
           : undefined;
 
+      const statedProblem = (newOrderData.description || newOrderData.diagnosis).trim();
+
       // Create order
       const order = await orderService.createOrder({
         clientId: client.id,
         deviceId: device.id,
-        technicianId: newOrderData.technicianId,
-        technicianName: newOrderData.technicianName,
-        intakeManagerName: newOrderData.intakeManagerName,
-        deliveryManagerName: newOrderData.deliveryManagerName,
+        technicianId: '',
+        technicianName: '',
+        intakeManagerName: newOrderData.intakeManagerName || user?.name || 'Сотрудник',
+        deliveryManagerName: '',
         status: defaultOpenStatusCode,
         priority: newOrderData.priority,
-        description: newOrderData.staffComments,
-        diagnosis: newOrderData.diagnosis,
+        description: statedProblem,
+        diagnosis: '',
         estimatedCost: newOrderData.estimatedCost,
         estimatedDays: newOrderData.estimatedDays,
         parts: initialParts,
@@ -2002,20 +1608,10 @@ const Orders: React.FC = () => {
             message: 'Заказ создан.',
             createdAt: new Date().toISOString(),
           },
-          ...(newOrderData.staffComments.trim()
-            ? [
-                {
-                  id: `${Date.now()}_initial_note`,
-                  channel: 'internal',
-                  author: user?.name || 'Сотрудник',
-                  message: newOrderData.staffComments.trim(),
-                  createdAt: new Date().toISOString(),
-                } as const,
-              ]
-            : []),
         ],
       });
 
+      notifyOrderCreationSms(order);
       setOrdersData(prev => [order, ...prev]);
 
       if (protectionPartForOrder) {
@@ -2031,13 +1627,27 @@ const Orders: React.FC = () => {
       }
 
       await handleCreateAcceptanceAct(order, client, device, {
-        reasonForContact: newOrderData.description || newOrderData.staffComments || order.description,
+        reasonForContact: statedProblem,
         estimatedPrice: newOrderData.estimatedCost || order.estimatedCost,
         advancePayment: newOrderData.advancePayment,
+        staffComments: newOrderData.staffComments,
+        clientComment: newOrderData.clientFieldValues.clientComment,
       });
 
+      const advanceAmount = Math.max(0, Number(newOrderData.advancePayment) || 0);
+      if (advanceAmount > 0) {
+        const orderWithAdvance = await applyOrderPayment(order, {
+          amount: advanceAmount,
+          method: newOrderData.advancePaymentMethod,
+          notes: 'Аванс при создании заказа',
+          isAdvance: true,
+        });
+        if (orderWithAdvance) {
+          setOrdersData((prev) => prev.map((item) => (item.id === orderWithAdvance.id ? orderWithAdvance : item)));
+        }
+      }
+
       setIsStepByStepOrderOpen(false);
-      setCurrentStep(0);
       
       toast.success('Заказ успешно создан');
     } catch (error) {
@@ -2049,30 +1659,32 @@ const Orders: React.FC = () => {
   const handleOrderFormSubmit = async (formData: any) => {
     try {
       await clientService.refreshFromApi();
-      // Create/update client
       const existingClient = clientService.findClientByPhone(formData.phone);
-      const client = existingClient
-        ? (await clientService.updateClient(existingClient.id, {
-            firstName: formData.clientName.split(' ')[0] || '',
-            lastName: formData.clientName.split(' ').slice(1).join(' ') || '',
-            phone: normalizePhoneForStorage(formData.phone),
-            email: formData.email || existingClient.email,
-            notes: formData.clientComment || existingClient.notes || '',
-          })) || existingClient
-        : await clientService.createClient({
-            firstName: formData.clientName.split(' ')[0] || '',
-            lastName: formData.clientName.split(' ').slice(1).join(' ') || '',
-            phone: normalizePhoneForStorage(formData.phone),
-            email: formData.email || '',
-            notes: formData.clientComment || '',
-          });
+      const clientFieldValues = collectClientFieldValues(crmSettings, formData);
+      const clientFieldError = validateClientFieldsForOrder(
+        crmSettings,
+        formData.clientType,
+        clientFieldValues
+      );
+      if (clientFieldError) {
+        toast.error(clientFieldError);
+        return;
+      }
 
-      const selectedTechnician =
-        assigneeOptions.find((option) => option.name === formData.performer) ||
-        technicianOptions.find((option) => option.name === formData.performer) ||
-        assigneeOptions[0] ||
-        technicianOptions[0];
-      const intakeManager = formData.manager || assigneeOptions[0]?.name || managerOptions[0]?.name || user?.name || 'Менеджер';
+      const clientPayload = buildClientPayloadFromFields({
+        settings: crmSettings,
+        clientType: formData.clientType,
+        fieldValues: clientFieldValues,
+        firstName: formData.clientName.split(' ')[0] || '',
+        lastName: formData.clientName.split(' ').slice(1).join(' ') || '',
+        phone: normalizePhoneForStorage(formData.phone),
+        existingClient,
+      });
+      const client = existingClient
+        ? (await clientService.updateClient(existingClient.id, clientPayload)) || existingClient
+        : await clientService.createClient(clientPayload);
+
+      const intakeManager = formData.manager || user?.name || managerOptions[0]?.name || assigneeOptions[0]?.name || 'Менеджер';
 
       const device = await orderService.createDevice({
         type: 'phone',
@@ -2089,10 +1701,10 @@ const Orders: React.FC = () => {
       const newOrder = await orderService.createOrder({
         clientId: client.id,
         deviceId: device.id,
-        technicianId: selectedTechnician?.id || '',
-        technicianName: selectedTechnician?.name || '',
+        technicianId: '',
+        technicianName: '',
         intakeManagerName: intakeManager,
-        deliveryManagerName: intakeManager,
+        deliveryManagerName: '',
         status: defaultOpenStatusCode,
         priority: 'medium',
         description: formData.reasonForContact,
@@ -2127,10 +1739,27 @@ const Orders: React.FC = () => {
         ],
       });
 
+      notifyOrderCreationSms(newOrder);
       setOrdersData(prev => [newOrder, ...prev]);
 
       // Create acceptance act
       await handleCreateAcceptanceAct(newOrder, client, device, formData);
+
+      const advanceAmount = Math.max(
+        0,
+        Number(formData.advance || formData.prepayment || 0)
+      );
+      if (advanceAmount > 0) {
+        const orderWithAdvance = await applyOrderPayment(newOrder, {
+          amount: advanceAmount,
+          method: 'cash',
+          notes: 'Аванс при создании заказа',
+          isAdvance: true,
+        });
+        if (orderWithAdvance) {
+          setOrdersData((prev) => prev.map((item) => (item.id === orderWithAdvance.id ? orderWithAdvance : item)));
+        }
+      }
 
       // Show toast after document window handling
       setTimeout(() => {
@@ -2143,18 +1772,132 @@ const Orders: React.FC = () => {
     }
   };
 
-  const handleViewOrder = (order: Order) => {
+  const handleViewOrder = async (order: Order) => {
     setSelectedOrder({ ...order });
-    setMasterCommentText('');
     setIsOrderViewDialogOpen(true);
+    const fullOrder = await ensureFullOrder(order);
+    setSelectedOrder(fullOrder);
+    markOrderTelegramInboxSeen(fullOrder);
   };
 
   const handlePayment = (order: Order) => {
     setSelectedOrder({ ...order });
+    setPaymentDialogMode('payment');
     setQuickPaymentMethod('cash');
-    setQuickPaymentAmount(getOrderTotal(order));
+    setQuickPaymentAmount(getOrderDebt(order));
     setQuickPaymentNotes('');
     setIsPaymentDialogOpen(true);
+  };
+
+  const handleAdvancePayment = (order: Order) => {
+    setSelectedOrder({ ...order });
+    setPaymentDialogMode('advance');
+    setQuickPaymentMethod('cash');
+    setQuickPaymentAmount(0);
+    setQuickPaymentNotes('Аванс');
+    setIsPaymentDialogOpen(true);
+  };
+
+  const applyOrderPayment = async (
+    order: Order,
+    {
+      amount,
+      method,
+      notes = '',
+      isAdvance = false,
+    }: {
+      amount: number;
+      method: typeof quickPaymentMethod;
+      notes?: string;
+      isAdvance?: boolean;
+    }
+  ): Promise<Order | null> => {
+    const orderDebt = getOrderDebt(order);
+    const orderTotal = getOrderTotal(order);
+
+    if (!amount || amount <= 0) {
+      toast.error('Укажите сумму оплаты');
+      return null;
+    }
+
+    if (isAdvance) {
+      if (orderTotal > 0 && amount > orderDebt) {
+        toast.error(`Сумма аванса не может превышать остаток к оплате (${orderDebt.toLocaleString('ru-RU')} ₽)`);
+        return null;
+      }
+    } else if (orderTotal > 0) {
+      if (orderDebt <= 0) {
+        toast.error('Заказ уже полностью оплачен');
+        return null;
+      }
+      if (amount > orderDebt) {
+        toast.error(`Сумма не может превышать остаток к оплате (${orderDebt.toLocaleString('ru-RU')} ₽)`);
+        return null;
+      }
+    }
+
+    await orderService.addPayment(order.id, {
+      amount,
+      method,
+      processedBy: user?.name || 'Сотрудник',
+      notes: notes || (isAdvance ? 'Аванс' : ''),
+    });
+
+    let refreshedOrder = await orderService.getOrderById(order.id);
+    if (refreshedOrder && getOrderDebt(refreshedOrder) <= 0 && refreshedOrder.status !== cancelledStatusCode) {
+      refreshedOrder = await orderService.updateOrder(refreshedOrder.id, {
+        status: completedStatusCode,
+        isPaid: true,
+        completedAt: refreshedOrder.completedAt || new Date().toISOString(),
+      });
+      notifyAutoStatusSmsToasts(refreshedOrder, Date.now() - 10000);
+    }
+
+    if (refreshedOrder) {
+      const paymentLabel = isAdvance ? 'Аванс' : 'Платеж';
+      const methodLabel = getPaymentMethodLabel(method, crmSettings.payment.paymentMethodOptions);
+      const paymentHistory = createHistoryEntry(
+        'payment',
+        `${paymentLabel}: ${amount.toLocaleString('ru-RU')} ₽, способ: ${methodLabel}${notes ? `, комментарий: ${notes}` : ''}.`
+      );
+      const orderWithPaymentHistory = appendOrderHistory(refreshedOrder, [paymentHistory]);
+      await orderService.updateOrder(orderWithPaymentHistory.id, orderWithPaymentHistory);
+      setOrdersData((prev) => prev.map((item) => (item.id === orderWithPaymentHistory.id ? orderWithPaymentHistory : item)));
+      if (selectedOrder?.id === orderWithPaymentHistory.id) {
+        setSelectedOrder(orderWithPaymentHistory);
+      }
+      refreshedOrder = orderWithPaymentHistory;
+    }
+
+    await cashService.addOperation({
+      type: 'income',
+      amount,
+      description: isAdvance ? `Аванс по заказу ${order.orderNumber}` : `Оплата заказа ${order.orderNumber}`,
+      category: 'Ремонт',
+      orderId: order.orderNumber,
+      processedBy: user?.name || 'Сотрудник',
+      paymentMethod: method,
+      registerType:
+        method === 'card'
+          ? 'bank_terminal'
+          : method === 'transfer'
+            ? 'online'
+            : 'cashbox',
+      source: 'order_payment',
+      notes: `${isAdvance ? 'Аванс' : 'Оплата'} • способ: ${getPaymentMethodLabel(method, crmSettings.payment.paymentMethodOptions)}${notes ? ` • ${notes}` : ''}`,
+    });
+
+    const orderForDocument = refreshedOrder || order;
+    if (orderForDocument && getOrderDebt(orderForDocument) <= 0) {
+      await handleCreateWorkCompletionAct({
+        ...orderForDocument,
+        completedAt: orderForDocument.completedAt || new Date().toISOString(),
+        status: orderForDocument.status === cancelledStatusCode ? orderForDocument.status : completedStatusCode,
+        isPaid: true,
+      });
+    }
+
+    return refreshedOrder;
   };
 
   const handleDeleteOrder = async (orderId: string) => {
@@ -2195,73 +1938,239 @@ const Orders: React.FC = () => {
     window.open(link, '_self');
   };
 
-  const openCommunicationCenter = (
-    order: Order,
-    channel: 'whatsapp' | 'telegram'
-  ) => {
-    setSelectedOrder(order);
-    setCommunicationChannel(channel);
-    setCommunicationMessage(buildCommunicationTemplate(order, channel));
-    setIsCommunicationDialogOpen(true);
-  };
+  const getOrderUnreadTelegramCount = useCallback(
+    (orderOrId: Order | string) => {
+      const order =
+        typeof orderOrId === 'string'
+          ? ordersData.find((item) => item.id === orderOrId)
+          : orderOrId;
+      if (!order) {
+        return 0;
+      }
 
-  const handleWhatsAppClient = (order: Order) => {
-    openCommunicationCenter(order, 'whatsapp');
-  };
+      const clientChatId = getClientTelegramChatId(order);
+      const clientPhone = normalizePhoneForCompare(order.clientPhone || '');
+
+      return telegramInbox.filter((item) => {
+        if (!isTelegramItemUnread(item)) {
+          return false;
+        }
+        if (item.orderId === order.id) {
+          return true;
+        }
+        if (item.orderId?.trim()) {
+          return false;
+        }
+        if (order.clientId && item.clientId === order.clientId) {
+          return true;
+        }
+        if (clientChatId && item.chatId === clientChatId) {
+          return true;
+        }
+        if (clientPhone.length >= 10 && normalizePhoneForCompare(item.clientPhone || '') === clientPhone) {
+          return true;
+        }
+        return false;
+      }).length;
+    },
+    [ordersData, telegramInbox]
+  );
+
+  const markOrderTelegramInboxSeen = useCallback((orderOrId: Order | string) => {
+    const order =
+      typeof orderOrId === 'string'
+        ? ordersData.find((item) => item.id === orderOrId)
+        : orderOrId;
+    if (!order) {
+      return;
+    }
+
+    void markTelegramInboxRead({
+      orderId: order.id,
+      clientId: order.clientId,
+      chatId: getClientTelegramChatId(order),
+      phone: order.clientPhone,
+    });
+  }, [ordersData]);
+
+  const selectedOrderUnreadTelegramCount = useMemo(
+    () => (selectedOrder ? getOrderUnreadTelegramCount(selectedOrder) : 0),
+    [getOrderUnreadTelegramCount, selectedOrder]
+  );
+
+  const openCommunicationCenter = useCallback(
+    async (order: Order, channel: 'telegram' | 'sms' = 'telegram') => {
+      const [freshSettings] = await Promise.all([appSettingsService.refreshFromApi(), clientService.refreshFromApi()]);
+      setCrmSettings(freshSettings);
+      const fullOrder = await ensureFullOrder(order);
+      markOrderTelegramInboxSeen(fullOrder);
+      setSelectedOrder(fullOrder);
+      setCommunicationChannel(channel);
+      setIsCommunicationDialogOpen(true);
+    },
+    [ensureFullOrder, markOrderTelegramInboxSeen]
+  );
+
+  const openedOrderFromQueryRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const orderId = new URLSearchParams(location.search).get('orderId');
+    if (!orderId) {
+      openedOrderFromQueryRef.current = null;
+      return;
+    }
+    if (ordersData.length === 0 || openedOrderFromQueryRef.current === orderId) {
+      return;
+    }
+    const order = ordersData.find((item) => item.id === orderId);
+    if (!order) {
+      return;
+    }
+    openedOrderFromQueryRef.current = orderId;
+    void openCommunicationCenter(order, 'telegram');
+  }, [location.search, ordersData, openCommunicationCenter]);
 
   const handleTelegramClient = (order: Order) => {
     openCommunicationCenter(order, 'telegram');
   };
 
-  const handleSaveCommunication = async () => {
-    if (!selectedOrder || !communicationMessage.trim()) {
+  const saveTelegramToHistory = async (message: string) => {
+    if (!selectedOrder) {
+      return null;
+    }
+    const updatedOrder = appendOrderHistory(selectedOrder, [
+      createHistoryEntry('telegram', `Telegram: ${message}`),
+    ]);
+    await orderService.updateOrder(selectedOrder.id, updatedOrder);
+    setOrdersData((prev) => prev.map((order) => (order.id === updatedOrder.id ? updatedOrder : order)));
+    setSelectedOrder(updatedOrder);
+    return updatedOrder;
+  };
+
+  const handleSendCommunication = async (messageText: string) => {
+    if (!selectedOrder || !messageText.trim()) {
       toast.error('Введите сообщение для клиента');
       return;
     }
 
-    const communicationEntry = {
-      id: Date.now().toString(),
-      channel: communicationChannel,
-      author: user?.name || 'Сотрудник',
-      message: communicationMessage.trim(),
-      createdAt: new Date().toISOString(),
+    const message = messageText.trim();
+    const orderId = selectedOrder.id;
+
+    const applyOrderState = (order: Order) => {
+      setSelectedOrder(order);
+      setOrdersData((prev) => prev.map((item) => (item.id === order.id ? order : item)));
     };
 
-    const updatedOrder = {
-      ...selectedOrder,
-      communicationHistory: [...(selectedOrder.communicationHistory || []), communicationEntry],
+    const reconcileOrderAfterSend = async (resultOrder?: Order | null) => {
+      const freshOrder = await orderService.getOrderById(orderId);
+      const order = freshOrder ?? resultOrder ?? null;
+      if (order) {
+        applyOrderState(order);
+      }
     };
 
+    const appendOptimisticOutbound = (channel: 'telegram' | 'sms', text: string) => {
+      const entry: OrderCommunicationEntry = {
+        id: `temp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        channel,
+        author: 'CRM',
+        message:
+          channel === 'telegram'
+            ? `Исходящее Telegram: ${text}`
+            : `Исходящая SMS на ${selectedOrder.clientPhone || ''}: ${text}`,
+        createdAt: new Date().toISOString(),
+        direction: 'outbound',
+      };
+      const optimisticOrder = appendOrderHistory(selectedOrder, [entry]);
+      applyOrderState(optimisticOrder);
+      return entry.id;
+    };
+
+    const removeOptimisticEntry = (tempId: string) => {
+      setSelectedOrder((prev) => {
+        if (!prev) {
+          return prev;
+        }
+        const updatedOrder = {
+          ...prev,
+          communicationHistory: (prev.communicationHistory || []).filter((entry) => entry.id !== tempId),
+        };
+        setOrdersData((prevOrders) =>
+          prevOrders.map((order) => (order.id === updatedOrder.id ? updatedOrder : order))
+        );
+        return updatedOrder;
+      });
+    };
+
+    setIsSendingCommunication(true);
+    let optimisticEntryId: string | null = null;
     try {
-      await orderService.updateOrder(selectedOrder.id, updatedOrder);
-      setOrdersData((prev) => prev.map((order) => (order.id === updatedOrder.id ? updatedOrder : order)));
-      setSelectedOrder(updatedOrder);
-      setIsCommunicationDialogOpen(false);
-      toast.success(`Сообщение в ${communicationChannel === 'whatsapp' ? 'WhatsApp' : 'Telegram'} сохранено в CRM`);
+      if (communicationChannel === 'sms') {
+        if (!crmSettings.integrations.smsConnected || crmSettings.integrations.smsProvider === 'none') {
+          toast.error('Подключите SMS-провайдера в настройках');
+          return;
+        }
+        optimisticEntryId = appendOptimisticOutbound('sms', message);
+        const result = await smsService.sendCustomSms(orderId, message);
+        await reconcileOrderAfterSend(result.order);
+        toast.success('SMS отправлена клиенту');
+        return;
+      }
+
+      if (communicationChannel === 'telegram' && crmSettings.integrations.telegramConnected) {
+        const chatId = getClientTelegramChatId(selectedOrder);
+        if (!chatId) {
+          const botLink = getTelegramBotLink(selectedOrder);
+          toast.error(
+            botLink
+              ? 'У клиента не привязан Telegram. Отправьте ему ссылку на бота из окна чата.'
+              : 'У клиента не привязан Telegram. Подключите бота в настройках.'
+          );
+          return;
+        }
+        optimisticEntryId = appendOptimisticOutbound('telegram', message);
+        const result = await telegramService.sendCustomTelegram(orderId, message);
+        await reconcileOrderAfterSend(result.order);
+        toast.success('Сообщение отправлено в Telegram');
+        return;
+      }
+
+      await saveTelegramToHistory(message);
+      const link = getExternalTelegramLink(selectedOrder, message);
+      if (link) {
+        window.open(link, '_blank', 'noopener,noreferrer');
+        toast.success('Сообщение сохранено, открыт Telegram');
+      } else {
+        toast.success('Сообщение сохранено в CRM. Скопируйте текст и отправьте клиенту вручную.');
+      }
     } catch (error) {
-      toast.error('Не удалось сохранить историю общения');
+      if (optimisticEntryId) {
+        removeOptimisticEntry(optimisticEntryId);
+      }
+      toast.error(getApiErrorMessage(error, 'Не удалось отправить сообщение'));
+    } finally {
+      setIsSendingCommunication(false);
     }
   };
 
-  const handleAddMasterComment = async () => {
+  const handleAddMasterComment = async (text: string) => {
     if (!selectedOrder) {
       return;
     }
-    const text = masterCommentText.trim();
-    if (!text) {
+    const trimmed = text.trim();
+    if (!trimmed) {
       toast.error('Введите комментарий для мастера');
       return;
     }
 
     const updatedOrder = appendOrderHistory(selectedOrder, [
-      createHistoryEntry('internal', text),
+      createHistoryEntry('internal', trimmed),
     ]);
 
     try {
       await orderService.updateOrder(selectedOrder.id, updatedOrder);
       setOrdersData((prev) => prev.map((order) => (order.id === updatedOrder.id ? updatedOrder : order)));
       setSelectedOrder(updatedOrder);
-      setMasterCommentText('');
       toast.success('Комментарий сохранен в истории заказа');
     } catch (error) {
       toast.error('Не удалось сохранить комментарий');
@@ -2278,56 +2187,98 @@ const Orders: React.FC = () => {
     setIsEditOrderDialogOpen(true);
   };
 
-  const handleSaveOrderEdit = async (updatedData: Partial<Order>) => {
+  const handleSaveOrderEdit = async (updatedData: Order) => {
     if (!selectedOrder) return;
     
     try {
       const currentOrder = ordersData.find((order) => order.id === selectedOrder.id) || selectedOrder;
-      const updatedOrder = { ...currentOrder, ...updatedData };
+      const nextClientName = (updatedData.clientName || '').trim();
+      const nextClientPhone = normalizePhoneForStorage(updatedData.clientPhone || '');
+      const nameChanged = nextClientName !== (currentOrder.clientName || '').trim();
+      const phoneChanged =
+        nextClientPhone !== normalizePhoneForStorage(currentOrder.clientPhone || '');
+
+      if (currentOrder.clientId && (nameChanged || phoneChanged)) {
+        await clientService.refreshFromApi();
+        const existingClient =
+          clientService.getClients().find((client) => client.id === currentOrder.clientId) || null;
+        const nameParts = nextClientName.split(/\s+/).filter(Boolean);
+        await clientService.updateClient(currentOrder.clientId, {
+          firstName: nameParts[0] || existingClient?.firstName || 'Клиент',
+          lastName: nameParts.slice(1).join(' ') || '',
+          phone: nextClientPhone || existingClient?.phone || '',
+        });
+      }
+
+      const updatedOrder = {
+        ...currentOrder,
+        ...updatedData,
+        clientName: nextClientName,
+        clientPhone: nextClientPhone || updatedData.clientPhone || '',
+      };
       await persistOrderChanges(currentOrder, updatedOrder, 'Заказ успешно обновлен');
+
+      if (currentOrder.clientId && (nameChanged || phoneChanged)) {
+        setOrdersData((prev) =>
+          prev.map((order) =>
+            order.clientId === currentOrder.clientId
+              ? {
+                  ...order,
+                  clientName: nextClientName,
+                  clientPhone: nextClientPhone || order.clientPhone,
+                }
+              : order
+          )
+        );
+      }
+
+      setSelectedOrder(updatedOrder);
       setIsEditOrderDialogOpen(false);
     } catch (error) {
       console.error('Ошибка при обновлении заказа:', error);
-      toast.error('Ошибка при обновлении заказа');
+      toast.error(getApiErrorMessage(error, 'Ошибка при обновлении заказа'));
     }
   };
 
   // Work / parts actions
-  const handleAddWork = (order: Order) => {
-    console.log('handleAddWork called with order:', order);
+  const resetAddWorkForm = () => {
+    setAddWorkInitialForm(emptyAddWorkForm);
+    setSelectedPart(null);
+    setWorkType('work');
+    setEditingWorkItemId(null);
+    setAddWorkFormKey((prev) => prev + 1);
+  };
+
+  const handleAddWork = async (order: Order) => {
     if (!order) {
-      console.error('Order was not passed to handleAddWork');
       toast.error('Заказ не найден');
       return;
     }
     if (!order.id) {
-      console.error('Order has no id:', order);
       toast.error('У заказа отсутствует ID');
       return;
     }
-    
-    console.log('Setting selectedOrder:', order);
+
+    if (!inventoryParts.length) {
+      await refreshInventoryCatalog();
+    }
+
     setSelectedOrder(order);
+    resetAddWorkForm();
     setIsAddWorkDialogOpen(true);
-    
-    // Reset form on open
-    setWorkName('');
-    setWorkPrice('');
-    setWorkQuantity(1);
-    setWorkWarrantyDays('30');
-    setSelectedPart(null);
-    setWorkType('work');
-    setEditingWorkItemId(null);
   };
 
   const handleEditWorkItem = (order: Order, item: OrderPart) => {
     const linkedPart = (item as any).partInfo;
     setSelectedOrder(order);
     setEditingWorkItemId(item.id);
-    setWorkName((item as any).workName || linkedPart?.name || '');
-    setWorkPrice(String(Number(item.unitPrice || 0)));
-    setWorkQuantity(Number(item.quantity || 1));
-    setWorkWarrantyDays(String(Number((item as any).warrantyDays || 30)));
+    setAddWorkInitialForm({
+      workName: (item as any).workName || linkedPart?.name || '',
+      workPrice: String(Number(item.unitPrice || 0)),
+      workQuantity: Number(item.quantity || 1),
+      workWarrantyDays: String(Number((item as any).warrantyDays || 30)),
+      allowWithoutPart: !linkedPart,
+    });
     setSelectedPart(
       linkedPart
         ? {
@@ -2340,6 +2291,7 @@ const Orders: React.FC = () => {
         : null
     );
     setWorkType(linkedPart ? 'part' : 'work');
+    setAddWorkFormKey((prev) => prev + 1);
     setIsOrderViewDialogOpen(false);
     setIsAddWorkDialogOpen(true);
   };
@@ -2348,22 +2300,25 @@ const Orders: React.FC = () => {
     setIsSearchPartsDialogOpen(true);
   };
 
-  const handleAddWorkToOrder = async () => {
+  const handleAddWorkToOrder = async ({
+    workName,
+    workPrice,
+    workQuantity,
+    workWarrantyDays,
+    allowWithoutPart,
+  }: AddWorkFormValues) => {
     if (!selectedOrder) {
       toast.error('Заказ не выбран');
       return;
     }
 
-    console.log('selectedOrder check:', {
-      id: selectedOrder.id,
-      orderNumber: selectedOrder.orderNumber,
-      parts: selectedOrder.parts,
-      finalCost: selectedOrder.finalCost,
-      estimatedCost: selectedOrder.estimatedCost
-    });
-
     if (!workName.trim()) {
       toast.error('Введите название работы');
+      return;
+    }
+
+    if (!editingWorkItemId && !selectedPart && !allowWithoutPart) {
+      toast.error('Выберите запчасть или включите «Работа без запчасти»');
       return;
     }
 
@@ -2386,16 +2341,6 @@ const Orders: React.FC = () => {
     }
 
     try {
-      console.log('add work payload:', {
-        selectedOrder: selectedOrder.id,
-        workType,
-        workName,
-        workPrice,
-        workQuantity,
-        workWarrantyDays: parsedWarrantyDays,
-        selectedPart
-      });
-
       if (editingWorkItemId) {
         const currentItem = selectedOrder.parts?.find((item) => item.id === editingWorkItemId);
         if (!currentItem) {
@@ -2449,13 +2394,7 @@ const Orders: React.FC = () => {
         setSelectedOrder(updatedOrderWithHistory);
         toast.success('Позиция обновлена');
         setIsAddWorkDialogOpen(false);
-        setWorkName('');
-        setWorkPrice('');
-        setWorkQuantity(1);
-        setWorkWarrantyDays('30');
-        setSelectedPart(null);
-        setWorkType('work');
-        setEditingWorkItemId(null);
+        resetAddWorkForm();
         return;
       }
 
@@ -2482,8 +2421,6 @@ const Orders: React.FC = () => {
         workName: string;
         partInfo?: any & { partCost: number; workCost: number }
       };
-
-      console.log('created workItem:', workItem);
 
       // If part attached: validate stock and write off
       if (selectedPart) {
@@ -2533,15 +2470,7 @@ const Orders: React.FC = () => {
 
       toast.success(`Работа ${selectedPart ? 'с запчастью ' : ''}добавлена к заказу`);
       setIsAddWorkDialogOpen(false);
-      
-      // Reset form
-      setWorkName('');
-      setWorkPrice('');
-      setWorkQuantity(1);
-      setWorkWarrantyDays('30');
-      setSelectedPart(null);
-      setWorkType('work');
-      setEditingWorkItemId(null);
+      resetAddWorkForm();
     } catch (error) {
       console.error('Ошибка при добавлении работы:', error);
       console.error('error details:', {
@@ -2583,7 +2512,7 @@ const Orders: React.FC = () => {
   ).sort((a, b) => a.localeCompare(b, 'ru'));
 
   const filteredParts = inventoryParts.filter((part) => {
-    const search = normalizePartField(partsSearchTerm);
+    const search = normalizePartField(debouncedPartsSearchTerm);
     const matchesSearch =
       !search ||
       normalizePartField(part.name).includes(search) ||
@@ -2602,62 +2531,33 @@ const Orders: React.FC = () => {
     stock: part.quantity,
   }));
 
-  const quickPartExactMatch = inventoryParts.find((part) => {
-    const normalizedName = normalizePartField(quickPartName);
+  const openQuickReceiveDialog = (initial?: Partial<QuickReceiveFormValues>) => {
+    setQuickReceiveInitial({ ...emptyQuickReceiveForm(), ...initial });
+    setIsQuickReceiveDialogOpen(true);
+  };
+
+  const findQuickPartExactMatch = (values: QuickReceiveFormValues) => {
+    const normalizedName = normalizePartField(values.name);
     if (!normalizedName) {
-      return false;
+      return null;
     }
 
-    const partNameMatches = normalizePartField(part.name) === normalizedName;
-    const categoryMatches = !normalizePartField(quickPartCategory) || normalizePartField(part.category) === normalizePartField(quickPartCategory);
-    const brandMatches = !normalizePartField(quickPartBrand) || normalizePartField(part.brand) === normalizePartField(quickPartBrand);
-    const modelMatches = !normalizePartField(quickPartModel) || normalizePartField(part.model) === normalizePartField(quickPartModel);
+    return (
+      inventoryParts.find((part) => {
+        const partNameMatches = normalizePartField(part.name) === normalizedName;
+        const categoryMatches =
+          !normalizePartField(values.category) || normalizePartField(part.category) === normalizePartField(values.category);
+        const brandMatches =
+          !normalizePartField(values.brand) || normalizePartField(part.brand) === normalizePartField(values.brand);
+        const modelMatches =
+          !normalizePartField(values.model) || normalizePartField(part.model) === normalizePartField(values.model);
+        return partNameMatches && categoryMatches && brandMatches && modelMatches;
+      }) ||
+      inventoryParts.find((part) => normalizePartField(part.name) === normalizedName) ||
+      null
+    );
+  };
 
-    return partNameMatches && categoryMatches && brandMatches && modelMatches;
-  }) || inventoryParts.find((part) => normalizePartField(part.name) === normalizePartField(quickPartName)) || null;
-
-  const quickPartRelatedParts = inventoryParts.filter((part) => {
-    const normalizedName = normalizePartField(quickPartName);
-    if (!normalizedName) {
-      return true;
-    }
-
-    return normalizePartField(part.name) === normalizedName;
-  });
-
-  const quickPartNameOptions = Array.from(new Set(inventoryParts.map((part) => part.name).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'ru'));
-  const quickPartCategoryOptions = Array.from(
-    new Set(
-      [
-        ...inventoryCategoryNames,
-        ...(quickPartRelatedParts.length ? quickPartRelatedParts : inventoryParts)
-          .map((part) => part.category)
-          .filter(Boolean),
-      ],
-    ),
-  ).sort((a, b) => a.localeCompare(b, 'ru'));
-  const quickPartBrandOptions = Array.from(
-    new Set(
-      (quickPartRelatedParts.length ? quickPartRelatedParts : inventoryParts)
-        .map((part) => part.brand)
-        .filter(Boolean),
-    ),
-  ).sort((a, b) => a.localeCompare(b, 'ru'));
-  const quickPartModelOptions = Array.from(
-    new Set(
-      (quickPartRelatedParts.length ? quickPartRelatedParts : inventoryParts)
-        .filter((part) => !quickPartBrand.trim() || normalizePartField(part.brand) === normalizePartField(quickPartBrand))
-        .map((part) => part.model)
-        .filter(Boolean),
-    ),
-  ).sort((a, b) => a.localeCompare(b, 'ru'));
-
-  const workTotalPreview = (Number(workPrice) || 0) * workQuantity;
-  const selectedPartCost = selectedPart
-    ? Number(selectedPart.wholesalePrice ?? selectedPart.price ?? 0)
-    : 0;
-  const partCostPreview = selectedPart ? selectedPartCost * workQuantity : 0;
-  const marginPreview = Math.max(workTotalPreview - partCostPreview, 0);
   const protectionParts = React.useMemo(
     () =>
       inventoryParts.filter(
@@ -2665,21 +2565,10 @@ const Orders: React.FC = () => {
       ),
     [inventoryParts]
   );
-  const selectedProtectionPart = React.useMemo(
-    () => protectionParts.find((part) => part.id === protectionPartId) || null,
-    [protectionParts, protectionPartId]
-  );
   const quickSaleOptions = React.useMemo(
     () =>
       [...(crmSettings.orders.quickSaleOptions || [])]
         .filter((item) => item.enabled)
-        .map((item) =>
-          item.id === 'quick_sale_screen_protection'
-            ? { ...item, label: 'Защита экрана' }
-            : item.id === 'quick_sale_accessory'
-              ? { ...item, label: 'Продать аксессуар' }
-            : item
-        )
         .sort((a, b) => a.sortOrder - b.sortOrder),
     [crmSettings.orders.quickSaleOptions]
   );
@@ -2696,35 +2585,20 @@ const Orders: React.FC = () => {
       return [];
     }
 
-    const normalizedCategory = activeQuickSaleOption.category.trim().toLowerCase();
+    const categoryName = (activeQuickSaleOption.category || '').trim().toLowerCase();
+    if (!categoryName) {
+      return [];
+    }
     return inventoryParts.filter((part) => {
       const category = (part.category || '').trim().toLowerCase();
       const subcategory = (part.subcategory || '').trim().toLowerCase();
-      return category === normalizedCategory || subcategory === normalizedCategory;
+      return category === categoryName || subcategory === categoryName;
     });
   }, [inventoryParts, activeQuickSaleOption]);
   const selectedQuickSalePart = React.useMemo(
     () => availableQuickSaleParts.find((part) => part.id === quickSaleForm.partId) || null,
     [availableQuickSaleParts, quickSaleForm.partId]
   );
-
-  useEffect(() => {
-    if (!isSearchPartsDialogOpen) {
-      return;
-    }
-
-    const trimmedSearch = partsSearchTerm.trim();
-    if (!trimmedSearch) {
-      return;
-    }
-
-    setQuickPartName((prev) => {
-      if (!prev.trim() || normalizePartField(prev) === normalizePartField(partsSearchTerm)) {
-        return trimmedSearch;
-      }
-      return prev;
-    });
-  }, [isSearchPartsDialogOpen, partsSearchTerm]);
 
   useEffect(() => {
     if (!selectedQuickSalePart || !activeQuickSaleOption) {
@@ -2744,43 +2618,30 @@ const Orders: React.FC = () => {
     });
   }, [selectedQuickSalePart, activeQuickSaleOption, quickSaleForm.quantity]);
 
-  const previewRates = selectedOrder ? getOrderRoleRates(selectedOrder) : {
-    technicianRate: 0,
-    intakeRate: 0,
-    deliveryRate: 0,
-  };
-  const previewEarningsRows = [
-    {
-      key: 'technician',
-      label: 'Исполнитель',
-      name: selectedOrder?.technicianName || 'Не назначен',
-      rate: previewRates.technicianRate,
-      amount: (marginPreview * previewRates.technicianRate) / 100,
-    },
-    {
-      key: 'intake',
-      label: 'Принял менеджер',
-      name: selectedOrder?.intakeManagerName || 'Не назначен',
-      rate: previewRates.intakeRate,
-      amount: (marginPreview * previewRates.intakeRate) / 100,
-    },
-    {
-      key: 'delivery',
-      label: 'Выдает менеджер',
-      name: selectedOrder?.deliveryManagerName || 'Не назначен',
-      rate: previewRates.deliveryRate,
-      amount: (marginPreview * previewRates.deliveryRate) / 100,
-    },
-  ];
+  const workNamesFromOrders = React.useMemo(() => {
+    const names = new Set<string>();
+    ordersData.forEach((order) => {
+      (order.parts || []).forEach((part) => {
+        const workName = String((part as any).workName || '').trim();
+        if (workName) {
+          names.add(workName);
+        }
+      });
+    });
+    return Array.from(names);
+  }, [ordersData]);
 
   const workNameOptions = React.useMemo(
-    () => Array.from(new Set([...commonWorkNames, ...customWorkNames])).sort((a, b) => a.localeCompare(b, 'ru')),
-    [customWorkNames]
+    () =>
+      Array.from(new Set([...commonWorkNames, ...customWorkNames, ...workNamesFromOrders])).sort((a, b) =>
+        a.localeCompare(b, 'ru')
+      ),
+    [customWorkNames, workNamesFromOrders]
   );
 
   const rememberWorkName = React.useCallback((value: string) => {
     const normalized = value.trim();
-    if (!normalized || commonWorkNames.some((name) => normalizePartField(name) === normalizePartField(normalized))) {
+    if (!normalized) {
       return;
     }
 
@@ -2788,21 +2649,29 @@ const Orders: React.FC = () => {
       if (prev.some((name) => normalizePartField(name) === normalizePartField(normalized))) {
         return prev;
       }
+      if (commonWorkNames.some((name) => normalizePartField(name) === normalizePartField(normalized))) {
+        return prev;
+      }
 
       const next = [...prev, normalized].sort((a, b) => a.localeCompare(b, 'ru'));
-      localStorage.setItem(customWorkNamesStorageKey, JSON.stringify(next));
+      try {
+        localStorage.setItem(customWorkNamesStorageKey, JSON.stringify(next));
+      } catch {
+        // ignore quota errors
+      }
       return next;
     });
   }, []);
 
-  const handleQuickReceivePart = async () => {
-    const name = quickPartName.trim();
-    const category = quickPartCategory.trim() || 'Прочее';
-    const brand = quickPartBrand.trim() || 'Универсальная';
-    const model = quickPartModel.trim() || 'Без модели';
-    const wholesalePrice = Number(quickPartWholesalePrice);
+  const handleQuickReceivePart = async (values: QuickReceiveFormValues) => {
+    const name = values.name.trim();
+    const category = values.category.trim() || 'Прочее';
+    const brand = values.brand.trim() || 'Универсальная';
+    const model = values.model.trim() || 'Без модели';
+    const wholesalePrice = Number(values.wholesalePrice);
     const unitPrice = wholesalePrice;
-    const quantity = Number(quickPartQuantity);
+    const quantity = Number(values.quantity);
+    const quickPartExactMatch = findQuickPartExactMatch(values);
 
     if (!name) {
       toast.error('Введите название запчасти');
@@ -2861,7 +2730,7 @@ const Orders: React.FC = () => {
         unitPrice,
         supplier: 'Быстрое оприходование',
         location: 'Склад',
-        notificationsEnabled: true,
+        notificationsEnabled: false,
         alertThreshold: 1,
       });
     }
@@ -2875,47 +2744,41 @@ const Orders: React.FC = () => {
 
     await inventoryService.refreshFromApi();
     setInventoryParts(inventoryService.getParts());
-    setSelectedPart(uiPart);
-    setWorkName(createdPart.name);
-    setPartsSearchTerm(createdPart.name);
-    setQuickPartName('');
-    setQuickPartCategory('Прочее');
-    setQuickPartBrand('');
-    setQuickPartModel('');
-    setQuickPartWholesalePrice('');
-    setQuickPartQuantity(1);
     setIsQuickReceiveDialogOpen(false);
+
+    if (isQuickSaleDialogOpen) {
+      const quantity =
+        activeQuickSaleOption?.saleMode === 'single'
+          ? 1
+          : Math.max(1, Number(quickSaleForm.quantity) || 1);
+      setQuickSaleForm((prev) => ({
+        ...prev,
+        partId: createdPart.id,
+        quantity,
+        salePrice: String(Number(createdPart.unitPrice || 0) * quantity),
+      }));
+      toast.success(
+        quickPartExactMatch
+          ? 'Остаток пополнен, позиция выбрана для продажи'
+          : 'Запчасть оприходована и выбрана для продажи'
+      );
+      return;
+    }
+
+    setSelectedPart(uiPart);
+    setPartsSearchTerm(createdPart.name);
     setIsSearchPartsDialogOpen(false);
-    toast.success(quickPartExactMatch ? 'Остаток существующей запчасти пополнен и позиция выбрана' : 'Запчасть оприходована и выбрана в работу');
+    toast.success(
+      quickPartExactMatch
+        ? 'Остаток существующей запчасти пополнен и позиция выбрана'
+        : 'Запчасть оприходована и выбрана в работу'
+    );
   };
 
   // Delivery actions
   const handleDeliveryOrder = (order: Order) => {
-    console.log('handleDeliveryOrder called with order:', order);
     setSelectedOrder(order);
-    setPaymentAmount(getOrderDebt(order));
     setIsDeliveryDialogOpen(true);
-    console.log('selectedOrder set:', order);
-  };
-
-  const handleTestingChecklistChange = (key: string, value: boolean) => {
-    setTestingChecklist(prev => ({ ...prev, [key]: value }));
-  };
-
-  const handleCheckAllTests = () => {
-    setTestingChecklist({
-      screenWorks: true,
-      touchWorks: true,
-      cameraWorks: true,
-      soundWorks: true,
-      chargingWorks: true,
-      wifiWorks: true,
-      bluetoothWorks: true,
-      buttonsWork: true,
-      fingerprintWorks: true,
-      faceIdWorks: true
-    });
-    toast.success('Все тесты отмечены как пройденные');
   };
 
   const handleRemovePart = async (partId: string) => {
@@ -2946,19 +2809,16 @@ const Orders: React.FC = () => {
     }
   };
 
-  const handleCompleteDelivery = async () => {
+  const handleCompleteDelivery = async ({
+    paymentMethod,
+    paymentAmount,
+    screenProtection,
+    cleaning,
+  }: OrderDeliveryCompletePayload) => {
     if (!selectedOrder) return;
 
     try {
-      // Validate checklist
-      const allTestsPassed = Object.values(testingChecklist).every(test => test);
-      if (!allTestsPassed) {
-        toast.error('Не все тесты пройдены. Проверьте чек-лист перед выдачей.');
-        return;
-      }
-
-      // Add optional extra services
-      let additionalServices = [];
+      const additionalServices: Array<OrderPart & { workType: string; workName: string }> = [];
       if (screenProtection) {
         additionalServices.push({
           id: Date.now().toString() + '_protection',
@@ -2969,7 +2829,7 @@ const Orders: React.FC = () => {
           isUsed: true,
           workType: 'service',
           workName: 'Защита экрана'
-        } as OrderPart & { workType: string; workName: string });
+        });
       }
       if (cleaning) {
         additionalServices.push({
@@ -2981,10 +2841,9 @@ const Orders: React.FC = () => {
           isUsed: true,
           workType: 'service',
           workName: 'Чистка устройства'
-        } as OrderPart & { workType: string; workName: string });
+        });
       }
 
-      // Update order
       const updatedParts = [...(selectedOrder.parts || []), ...additionalServices];
       const updatedOrder = {
         ...selectedOrder,
@@ -2996,48 +2855,33 @@ const Orders: React.FC = () => {
         deliveryManagerName: selectedOrder.deliveryManagerName || user?.name || 'Сотрудник'
       };
 
-      await orderService.updateOrder(selectedOrder.id, updatedOrder);
+      const savedOrder = await orderService.updateOrder(selectedOrder.id, updatedOrder);
+      notifyAutoStatusSmsToasts(savedOrder, Date.now() - 10000);
       await cashService.addOperation({
         type: 'income',
-        amount: paymentAmount + (screenProtection ? 2000 : 0) + (cleaning ? 1000 : 0),
+        amount: paymentAmount,
         description: `Выдача и оплата заказа ${selectedOrder.orderNumber}`,
         category: 'Ремонт',
         orderId: selectedOrder.orderNumber,
         processedBy: selectedOrder.deliveryManagerName || user?.name || 'Сотрудник',
-        paymentMethod,
-        registerType: paymentMethod === 'card' ? 'bank_terminal' : paymentMethod === 'transfer' ? 'online' : 'cashbox',
+        paymentMethod: paymentMethod === 'online' ? 'transfer' : paymentMethod,
+        registerType: paymentMethod === 'card' ? 'bank_terminal' : paymentMethod === 'online' || paymentMethod === 'transfer' ? 'online' : 'cashbox',
         source: 'order_payment',
         notes: [
-          `Способ оплаты: ${paymentMethod}`,
+          `Способ оплаты: ${getPaymentMethodLabel(paymentMethod, crmSettings.payment.paymentMethodOptions)}`,
           screenProtection ? 'Защита экрана' : '',
           cleaning ? 'Чистка устройства' : '',
         ].filter(Boolean).join(' • '),
       });
       setOrdersData(prev => prev.map(order => 
-        order.id === selectedOrder.id ? updatedOrder : order
+        order.id === selectedOrder.id ? savedOrder : order
       ));
+      setSelectedOrder(savedOrder);
 
-      // Create work completion act
-      await handleCreateWorkCompletionAct(updatedOrder);
+      await handleCreateWorkCompletionAct(savedOrder);
 
       toast.success('Заказ успешно выдан клиенту');
       setIsDeliveryDialogOpen(false);
-      
-      // Reset UI state
-      setTestingChecklist({
-        screenWorks: false,
-        touchWorks: false,
-        cameraWorks: false,
-        soundWorks: false,
-        chargingWorks: false,
-        wifiWorks: false,
-        bluetoothWorks: false,
-        buttonsWork: false,
-        fingerprintWorks: false,
-        faceIdWorks: false
-      });
-      setScreenProtection(false);
-      setCleaning(false);
     } catch (error) {
       console.error('Ошибка при выдаче заказа:', error);
       toast.error('Ошибка при выдаче заказа');
@@ -3060,48 +2904,177 @@ const Orders: React.FC = () => {
   };
 
   // Create acceptance act after order creation
+  const buildOrderClientSnapshot = (order: Order): Client => ({
+    id: order.clientId,
+    firstName: order.clientName?.split(' ')[0] || '',
+    lastName: order.clientName?.split(' ').slice(1).join(' ') || '',
+    phone: order.clientPhone || '',
+    email: '',
+    address: '',
+    notes: '',
+    totalOrders: 0,
+    totalSpent: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  const buildOrderDeviceSnapshot = (order: Order, passwordOverride?: string): Device => ({
+    id: order.deviceId,
+    type: 'phone',
+    brand: order.deviceBrand || '',
+    model: order.deviceModel || '',
+    serialNumber: order.deviceSerial,
+    imei: order.deviceImei,
+    color: order.deviceColor,
+    password: passwordOverride ?? order.devicePassword ?? '',
+    condition: (order.deviceCondition as Device['condition']) || 'good',
+    externalCondition: order.deviceExternalCondition,
+    clientId: order.clientId,
+    createdAt: new Date().toISOString(),
+  });
+
+  const buildWorkCompletionLines = (order: Order) => {
+    const worksPerformed: WorkItem[] = [];
+    const partsUsed: PartItem[] = [];
+
+    if (order.parts && order.parts.length > 0) {
+      order.parts.forEach((part) => {
+        const workType = (part as any).workType;
+
+        if (workType === 'work_with_part' || workType === 'work_only') {
+          worksPerformed.push({
+            id: part.id,
+            name: getOrderLineTitle(part as any),
+            description: getOrderLineTitle(part as any),
+            cost: part.unitPrice,
+            quantity: part.quantity,
+            totalCost: part.totalPrice,
+            warrantyDays: Number((part as any).warrantyDays || 30),
+          });
+        } else if (part.partId === 'screen_protection' || part.partId === 'cleaning') {
+          worksPerformed.push({
+            id: part.id,
+            name: part.partId === 'screen_protection' ? 'Защита экрана' : 'Чистка устройства',
+            description: part.partId === 'screen_protection' ? 'Установка защитного стекла' : 'Чистка устройства',
+            cost: part.unitPrice,
+            quantity: part.quantity,
+            totalCost: part.totalPrice,
+            warrantyDays: Number((part as any).warrantyDays || 30),
+          });
+        } else {
+          partsUsed.push({
+            id: part.id,
+            partId: part.partId,
+            name: `Запчасть #${part.id}`,
+            partNumber: part.partId,
+            unitPrice: part.unitPrice,
+            quantity: part.quantity,
+            totalPrice: part.totalPrice,
+          });
+        }
+      });
+    }
+
+    if (worksPerformed.length === 0) {
+      worksPerformed.push({
+        id: '1',
+        name: 'Диагностика',
+        description: order.diagnosis || 'Диагностика устройства',
+        cost: 0,
+        quantity: 1,
+        totalCost: 0,
+        warrantyDays: 30,
+      });
+    }
+
+    const completionTotal =
+      worksPerformed.reduce((sum, work) => sum + Number(work.totalCost || 0), 0) +
+      partsUsed.reduce((sum, part) => sum + Number(part.totalPrice || 0), 0);
+    const completionWarrantyDays = Math.max(
+      30,
+      ...worksPerformed.map((work) => Number(work.warrantyDays || 0)).filter((value) => Number.isFinite(value))
+    );
+
+    return { worksPerformed, partsUsed, completionTotal, completionWarrantyDays };
+  };
+
+  const upsertAcceptanceActForOrder = async (
+    order: Order,
+    client?: Client,
+    device?: Device,
+    formData?: any
+  ) => {
+    const liveClient =
+      client ||
+      clientService.getClients().find((item) => item.id === order.clientId) ||
+      undefined;
+
+    const clientData = prepareAcceptanceActClient(
+      liveClient || buildOrderClientSnapshot(order),
+      {
+        receptionistNotes: formData?.receptionistNotes,
+        staffComments: formData?.staffComments || getOrderInternalNotes(order),
+        clientComment: formData?.clientComment,
+        clientNotes: formData?.clientNotes,
+        completeness: formData?.completeness,
+      }
+    );
+
+    const deviceData = device || buildOrderDeviceSnapshot(order, formData?.password);
+
+    return documentService.createAcceptanceAct(
+      order,
+      clientData,
+      deviceData,
+      formData?.reasonForContact || getOrderStatedProblem(order),
+      Number(formData?.estimatedPrice ?? order.estimatedCost ?? 0),
+      order.intakeManagerName || order.technicianName || user?.name || 'Сотрудник',
+      formData?.conditions || 'Устройство принимается на бесплатную диагностику и ремонт.',
+      Number(formData?.advancePayment || formData?.advance || formData?.prepayment || 0)
+    );
+  };
+
+  const upsertWorkCompletionActForOrder = async (order: Order) => {
+    const { worksPerformed, partsUsed, completionTotal, completionWarrantyDays } =
+      buildWorkCompletionLines(order);
+
+    return documentService.createWorkCompletionAct(
+      order,
+      buildOrderClientSnapshot(order),
+      buildOrderDeviceSnapshot(order),
+      worksPerformed,
+      partsUsed,
+      completionTotal,
+      completionWarrantyDays,
+      order.deliveryManagerName || order.technicianName || user?.name || 'Сотрудник'
+    );
+  };
+
+  const syncOrderDocumentsQuiet = async (order: Order) => {
+    try {
+      const [acceptanceAct, completionAct] = await Promise.all([
+        documentService.getAcceptanceActByOrderId(order.id),
+        documentService.getWorkCompletionActByOrderId(order.id),
+      ]);
+
+      const tasks: Promise<unknown>[] = [];
+      if (acceptanceAct) {
+        tasks.push(upsertAcceptanceActForOrder(order));
+      }
+      if (completionAct) {
+        tasks.push(upsertWorkCompletionActForOrder(order));
+      }
+      if (tasks.length > 0) {
+        await Promise.all(tasks);
+      }
+    } catch {
+      // Документы не критичны для сохранения заказа
+    }
+  };
+
   const handleCreateAcceptanceAct = async (order: Order, client?: Client, device?: Device, formData?: any) => {
     try {
-      // Use passed entities or build fallback from order
-      const clientData = client || {
-        id: order.clientId,
-        firstName: order.clientName?.split(' ')[0] || '',
-        lastName: order.clientName?.split(' ').slice(1).join(' ') || '',
-        phone: order.clientPhone || '',
-        email: '',
-        address: '',
-        notes: '',
-        totalOrders: 0,
-        totalSpent: 0,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      const deviceData = device || {
-        id: order.deviceId,
-        type: 'phone',
-        brand: order.deviceBrand || '',
-        model: order.deviceModel || '',
-        serialNumber: order.deviceSerial,
-        imei: order.deviceImei,
-        color: order.deviceColor,
-        condition: order.deviceCondition as any || 'good',
-        externalCondition: order.deviceExternalCondition,
-        clientId: order.clientId,
-        createdAt: new Date().toISOString(),
-      };
-
-      const acceptanceAct = await documentService.createAcceptanceAct(
-        order,
-        clientData,
-        deviceData,
-        formData?.reasonForContact || order.description,
-        formData?.estimatedPrice || order.estimatedCost,
-        order.intakeManagerName || order.technicianName || user?.name || 'Сотрудник',
-        formData?.conditions ||
-          'Устройство принимается на бесплатную диагностику и ремонт.',
-        Number(formData?.advancePayment || formData?.advance || formData?.prepayment || 0)
-      );
+      const acceptanceAct = await upsertAcceptanceActForOrder(order, client, device, formData);
 
       // Auto-open generated document
       setSelectedDocument(acceptanceAct);
@@ -3117,112 +3090,7 @@ const Orders: React.FC = () => {
   // Create work completion act at order completion
   const handleCreateWorkCompletionAct = async (order: Order) => {
     try {
-      const client: Client = {
-        id: order.clientId,
-        firstName: order.clientName?.split(' ')[0] || '',
-        lastName: order.clientName?.split(' ').slice(1).join(' ') || '',
-        phone: order.clientPhone || '',
-        email: '',
-        address: '',
-        notes: '',
-        totalOrders: 0,
-        totalSpent: 0,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      const device: Device = {
-        id: order.deviceId,
-        type: 'phone',
-        brand: order.deviceBrand || '',
-        model: order.deviceModel || '',
-        serialNumber: order.deviceSerial,
-        imei: order.deviceImei,
-        color: order.deviceColor,
-        condition: order.deviceCondition as any || 'good',
-        externalCondition: order.deviceExternalCondition,
-        clientId: order.clientId,
-        createdAt: new Date().toISOString(),
-      };
-
-      // Build works list from order.parts
-      const worksPerformed: WorkItem[] = [];
-      const partsUsed: PartItem[] = [];
-      
-      if (order.parts && order.parts.length > 0) {
-        order.parts.forEach((part) => {
-          // Detect line type
-          const workType = (part as any).workType;
-          const workName = (part as any).workName;
-          
-          if (workType === 'work_with_part' || workType === 'work_only') {
-            // Work line
-            worksPerformed.push({
-              id: part.id,
-              name: workName || 'Работа',
-              description: workName || 'Выполненная работа',
-              cost: part.unitPrice,
-              quantity: part.quantity,
-              totalCost: part.totalPrice,
-              warrantyDays: Number((part as any).warrantyDays || 30),
-            });
-          } else if (part.partId === 'screen_protection' || part.partId === 'cleaning') {
-            // Extra service line
-            worksPerformed.push({
-              id: part.id,
-              name: part.partId === 'screen_protection' ? 'Защита экрана' : 'Чистка устройства',
-              description: part.partId === 'screen_protection' ? 'Установка защитного стекла' : 'Чистка устройства',
-              cost: part.unitPrice,
-              quantity: part.quantity,
-              totalCost: part.totalPrice,
-              warrantyDays: Number((part as any).warrantyDays || 30),
-            });
-          } else {
-            // Regular part line (legacy format)
-            partsUsed.push({
-              id: part.id,
-              partId: part.partId,
-              name: `Запчасть #${part.id}`,
-              partNumber: part.partId,
-              unitPrice: part.unitPrice,
-              quantity: part.quantity,
-              totalPrice: part.totalPrice,
-            });
-          }
-        });
-      }
-      
-      // Fallback work if list is empty
-      if (worksPerformed.length === 0) {
-        worksPerformed.push({
-          id: '1',
-          name: 'Диагностика',
-          description: order.diagnosis || 'Диагностика устройства',
-          cost: 0,
-          quantity: 1,
-          totalCost: 0,
-          warrantyDays: 30,
-        });
-      }
-
-      const completionTotal =
-        worksPerformed.reduce((sum, work) => sum + Number(work.totalCost || 0), 0) +
-        partsUsed.reduce((sum, part) => sum + Number(part.totalPrice || 0), 0);
-      const completionWarrantyDays = Math.max(
-        30,
-        ...worksPerformed.map((work) => Number(work.warrantyDays || 0)).filter((value) => Number.isFinite(value))
-      );
-
-      const workCompletionAct = await documentService.createWorkCompletionAct(
-        order,
-        client,
-        device,
-        worksPerformed,
-        partsUsed, // used parts
-        completionTotal, // sum only from act rows (no estimated cost)
-        completionWarrantyDays,
-        order.deliveryManagerName || order.technicianName || user?.name || 'Сотрудник'
-      );
+      const workCompletionAct = await upsertWorkCompletionActForOrder(order);
 
       // Auto-open generated document
       setSelectedDocument(workCompletionAct);
@@ -3256,21 +3124,56 @@ const Orders: React.FC = () => {
   // Open document by type
   const handleViewDocument = async (order: Order, type: 'acceptance' | 'completion') => {
     try {
+      const fullOrder = (await orderService.getOrderById(order.id)) || order;
       let document: AcceptanceAct | WorkCompletionAct | null = null;
       
       if (type === 'acceptance') {
-        document = await documentService.getAcceptanceActByOrderId(order.id);
+        document = await documentService.getAcceptanceActByOrderId(fullOrder.id);
       } else {
-        document = await documentService.getWorkCompletionActByOrderId(order.id);
+        document = await documentService.getWorkCompletionActByOrderId(fullOrder.id);
       }
 
       if (document) {
+        if (type === 'acceptance') {
+          const act = document as AcceptanceAct;
+          const days = act.estimatedDays || fullOrder.estimatedDays;
+          const liveClient = clientService.getClients().find((item) => item.id === fullOrder.clientId);
+          let enrichedAct: AcceptanceAct = act;
+
+          if (days && !act.estimatedCompletionDate) {
+            enrichedAct = {
+              ...enrichedAct,
+              estimatedDays: days,
+              estimatedCompletionDate: calcEstimatedCompletionDate(
+                fullOrder.createdAt || act.acceptanceDate,
+                days
+              ).toISOString(),
+            };
+          }
+
+          document = enrichAcceptanceActForDisplay(enrichedAct, fullOrder, liveClient);
+        } else {
+          const completionAct = document as WorkCompletionAct;
+          const { worksPerformed, partsUsed, completionTotal, completionWarrantyDays } =
+            buildWorkCompletionLines(fullOrder);
+          document = enrichActDeviceFromOrder(
+            {
+              ...completionAct,
+              client: buildOrderClientSnapshot(fullOrder),
+              worksPerformed,
+              partsUsed,
+              totalCost: completionTotal,
+              warrantyPeriod: completionWarrantyDays,
+            },
+            fullOrder
+          );
+        }
         setSelectedDocument(document);
         setDocumentType(type);
         setIsDocumentDialogOpen(true);
       } else {
         if (type === 'acceptance') {
-          await handleCreateAcceptanceAct(order);
+          await handleCreateAcceptanceAct(fullOrder);
           return;
         }
 
@@ -3291,119 +3194,100 @@ const Orders: React.FC = () => {
       return;
     }
 
-    if (!quickPaymentAmount || quickPaymentAmount <= 0) {
-      toast.error('Укажите сумму оплаты');
-      return;
-    }
+    const isAdvance = paymentDialogMode === 'advance';
 
     try {
-      await orderService.addPayment(selectedOrder.id, {
+      const refreshedOrder = await applyOrderPayment(selectedOrder, {
         amount: quickPaymentAmount,
         method: quickPaymentMethod,
-        processedBy: user?.name || 'Сотрудник',
         notes: quickPaymentNotes,
+        isAdvance,
       });
 
-      let refreshedOrder = await orderService.getOrderById(selectedOrder.id);
-      if (refreshedOrder && getOrderDebt(refreshedOrder) <= 0 && refreshedOrder.status !== cancelledStatusCode) {
-        refreshedOrder = await orderService.updateOrder(refreshedOrder.id, {
-          status: completedStatusCode,
-          isPaid: true,
-          completedAt: refreshedOrder.completedAt || new Date().toISOString(),
-        });
+      if (!refreshedOrder) {
+        return;
       }
-
-      if (refreshedOrder) {
-        const paymentHistory = createHistoryEntry(
-          'payment',
-          `Платеж: ${quickPaymentAmount.toLocaleString('ru-RU')} ₽, способ: ${quickPaymentMethod}${quickPaymentNotes ? `, комментарий: ${quickPaymentNotes}` : ''}.`
-        );
-        const orderWithPaymentHistory = appendOrderHistory(refreshedOrder, [paymentHistory]);
-        await orderService.updateOrder(orderWithPaymentHistory.id, orderWithPaymentHistory);
-        setOrdersData((prev) => prev.map((order) => (order.id === orderWithPaymentHistory.id ? orderWithPaymentHistory : order)));
-        setSelectedOrder(orderWithPaymentHistory);
-        refreshedOrder = orderWithPaymentHistory;
-      }
-
-      await cashService.addOperation({
-        type: 'income',
-        amount: quickPaymentAmount,
-        description: `Оплата заказа ${selectedOrder.orderNumber}`,
-        category: 'Ремонт',
-        orderId: selectedOrder.orderNumber,
-        processedBy: user?.name || 'Сотрудник',
-        paymentMethod: quickPaymentMethod,
-        registerType:
-          quickPaymentMethod === 'card'
-            ? 'bank_terminal'
-            : quickPaymentMethod === 'transfer'
-              ? 'online'
-              : 'cashbox',
-        source: 'order_payment',
-        notes: `Способ оплаты: ${quickPaymentMethod}${quickPaymentNotes ? ` • ${quickPaymentNotes}` : ''}`,
-      });
 
       setIsPaymentDialogOpen(false);
       toast.success(
-        refreshedOrder && refreshedOrder.status === completedStatusCode
-          ? 'Оплата проведена, заказ закрыт'
-          : 'Оплата добавлена и записана в журнал движения денег'
+        isAdvance
+          ? 'Аванс внесён и записан в кассу'
+          : refreshedOrder.status === completedStatusCode
+            ? 'Оплата проведена, заказ закрыт'
+            : 'Оплата добавлена и записана в журнал движения денег'
       );
-
-      const orderForDocument = refreshedOrder || selectedOrder;
-      if (orderForDocument) {
-        await handleCreateWorkCompletionAct({
-          ...orderForDocument,
-          completedAt: orderForDocument.completedAt || new Date().toISOString(),
-          status: orderForDocument.status === cancelledStatusCode ? orderForDocument.status : completedStatusCode,
-          isPaid: getOrderDebt(orderForDocument) <= 0,
-        });
-      }
-    } catch (error) {
-      toast.error('Не удалось добавить оплату');
+    } catch {
+      toast.error(isAdvance ? 'Не удалось внести аванс' : 'Не удалось добавить оплату');
     }
   };
 
-  const periodOrders = ordersData.filter((order) => isDateWithinRange(order.createdAt, periodFilter));
+  const filteredOrders = useMemo(() => {
+    const periodOrders = ordersData.filter((order) => isDateWithinRange(order.createdAt, periodFilter));
+    const searchValue = debouncedSearchTerm.trim().toLowerCase();
+    const searchPhone = normalizePhoneForCompare(debouncedSearchTerm);
 
-  const filteredOrders = periodOrders.filter((order) => {
-    const searchValue = searchTerm.trim().toLowerCase();
-    const searchPhone = normalizePhoneForCompare(searchTerm);
-    const matchesSearch =
-      !searchValue ||
-      order.orderNumber.toLowerCase().includes(searchValue) ||
-      (order.clientName || '').toLowerCase().includes(searchValue) ||
-      (order.clientPhone || '').toLowerCase().includes(searchValue) ||
-      (searchPhone.length >= 3 && normalizePhoneForCompare(order.clientPhone).includes(searchPhone)) ||
-      (order.deviceBrand || '').toLowerCase().includes(searchValue) ||
-      (order.deviceModel || '').toLowerCase().includes(searchValue) ||
-      (order.description || '').toLowerCase().includes(searchValue) ||
-      (order.diagnosis || '').toLowerCase().includes(searchValue);
+    return periodOrders
+      .filter((order) => {
+        const matchesSearch =
+          !searchValue ||
+          order.orderNumber.toLowerCase().includes(searchValue) ||
+          (order.clientName || '').toLowerCase().includes(searchValue) ||
+          (order.clientPhone || '').toLowerCase().includes(searchValue) ||
+          (searchPhone.length >= 3 && normalizePhoneForCompare(order.clientPhone).includes(searchPhone)) ||
+          (order.deviceBrand || '').toLowerCase().includes(searchValue) ||
+          (order.deviceModel || '').toLowerCase().includes(searchValue) ||
+          getOrderStatedProblem(order).toLowerCase().includes(searchValue);
+        const matchesStatus = filterStatus === 'all' || order.status === filterStatus;
+        const matchesPriority = filterPriority === 'all' || order.priority === filterPriority;
+        const matchesScope =
+          filterScope === 'all' ||
+          (filterScope === 'active' && isActiveOrder(order)) ||
+          (filterScope === 'completed' && order.status === completedStatusCode) ||
+          (filterScope === 'cancelled' && order.status === cancelledStatusCode) ||
+          (filterScope === 'paid' && getOrderDebt(order) === 0 && getOrderTotal(order) > 0);
 
-    const matchesStatus = filterStatus === 'all' || order.status === filterStatus;
-    const matchesPriority = filterPriority === 'all' || order.priority === filterPriority;
-    const matchesScope =
-      filterScope === 'all' ||
-      (filterScope === 'active' && isActiveOrder(order)) ||
-      (filterScope === 'completed' && order.status === completedStatusCode) ||
-      (filterScope === 'cancelled' && order.status === cancelledStatusCode) ||
-      (filterScope === 'paid' && getOrderDebt(order) === 0 && getOrderTotal(order) > 0);
+        return matchesSearch && matchesStatus && matchesPriority && matchesScope;
+      })
+      .sort((a, b) => {
+        // В разделе «Все» — строго по номерам, без приоритета активных
+        if (filterScope === 'all') {
+          const aNum = Number(String(a.orderNumber || '').replace(/\D/g, '')) || 0;
+          const bNum = Number(String(b.orderNumber || '').replace(/\D/g, '')) || 0;
+          if (aNum !== bNum) {
+            return bNum - aNum;
+          }
+          return String(b.orderNumber || '').localeCompare(String(a.orderNumber || ''), 'ru', {
+            numeric: true,
+            sensitivity: 'base',
+          });
+        }
 
-    return matchesSearch && matchesStatus && matchesPriority && matchesScope;
-  }).sort((a, b) => {
-    const aClosed = isFinalOrderStatus(a.status, crmSettings) ? 1 : 0;
-    const bClosed = isFinalOrderStatus(b.status, crmSettings) ? 1 : 0;
+        const aClosed = isFinalOrderStatus(a.status, crmSettings) ? 1 : 0;
+        const bClosed = isFinalOrderStatus(b.status, crmSettings) ? 1 : 0;
 
-    if (aClosed !== bClosed) {
-      return aClosed - bClosed;
-    }
+        if (aClosed !== bClosed) {
+          return aClosed - bClosed;
+        }
 
-    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-  });
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+  }, [
+    ordersData,
+    periodFilter,
+    debouncedSearchTerm,
+    filterStatus,
+    filterPriority,
+    filterScope,
+    completedStatusCode,
+    cancelledStatusCode,
+    crmSettings,
+  ]);
+
+  const orderExchangeExportRows = useMemo(() => exportOrderRows(filteredOrders), [filteredOrders]);
 
   React.useEffect(() => {
     setOrdersPage(0);
-  }, [searchTerm, filterScope, filterStatus, filterPriority, periodFilter]);
+  }, [debouncedSearchTerm, filterScope, filterStatus, filterPriority, periodFilter]);
 
   const defaultColumnWidths: Record<string, number> = {
     orderNumber: 120,
@@ -3413,7 +3297,7 @@ const Orders: React.FC = () => {
     priority: 120,
     estimatedCost: 120,
     createdAt: 150,
-    actions: 350,
+    actions: 400,
   };
 
   const updateColumnWidth = (field: string, width: number) => {
@@ -3501,22 +3385,50 @@ const Orders: React.FC = () => {
     </Box>
   );
 
-  const baseColumns: GridColDef[] = [
+  const baseColumns: GridColDef[] = useMemo(() => [
     {
       field: 'orderNumber',
       headerName: 'Номер заказа',
       width: columnLayout.widths.orderNumber || defaultColumnWidths.orderNumber,
       renderHeader: () => renderResizableHeader('orderNumber', 'Номер заказа', 'center'),
-      renderCell: (params) => (
-        <Typography
-          variant="body2"
-          fontWeight="700"
-          color="primary.main"
-          sx={{ cursor: 'pointer', width: '100%', textAlign: 'center' }}
-        >
-          {params.value}
-        </Typography>
-      ),
+      renderCell: (params) => {
+        const unreadCount = getOrderUnreadTelegramCount(params.row.id);
+        return (
+        <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.25, width: '100%' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+            <Typography
+              variant="body2"
+              fontWeight="700"
+              color="primary.main"
+              sx={{ cursor: 'pointer' }}
+            >
+              {params.value}
+            </Typography>
+            {unreadCount > 0 ? (
+              <Badge badgeContent={unreadCount} color="error" max={9}>
+                <ChatBubbleOutline sx={{ fontSize: 16, color: '#3390ec' }} />
+              </Badge>
+            ) : null}
+          </Box>
+          {params.row.isWarranty && (
+            <Chip
+              size="small"
+              icon={<Security sx={{ fontSize: 12 }} />}
+              label="Гарантия"
+              sx={{
+                height: 18,
+                fontSize: 10,
+                fontWeight: 700,
+                bgcolor: 'rgba(255, 107, 53, 0.12)',
+                color: '#E64A19',
+                '& .MuiChip-icon': { color: '#E64A19', ml: 0.5 },
+                '& .MuiChip-label': { px: 0.75 },
+              }}
+            />
+          )}
+        </Box>
+        );
+      },
     },
     {
       field: 'clientName',
@@ -3535,7 +3447,7 @@ const Orders: React.FC = () => {
             {params.row.deviceBrand} {params.row.deviceModel}
           </Typography>
           <Typography variant="caption" color="textSecondary">
-            {params.row.deviceSerial}
+            пароль: {params.row.devicePassword?.trim() || '—'}
           </Typography>
         </Box>
       ),
@@ -3551,6 +3463,7 @@ const Orders: React.FC = () => {
           <Box sx={{ py: 0.5, width: '100%' }}>
             <StatusBadgeSelector
               value={statusValue}
+              options={orderStatusOptions}
               stopPropagation
               fullWidth
               onChange={(nextStatus) => handleInlineStatusChange(params.row as Order, nextStatus)}
@@ -3604,8 +3517,21 @@ const Orders: React.FC = () => {
       width: columnLayout.widths.actions || defaultColumnWidths.actions,
       renderHeader: () => renderResizableHeader('actions', 'Действия'),
       sortable: false,
-      renderCell: (params: any) => (
+      renderCell: (params: any) => {
+        const unreadCount = getOrderUnreadTelegramCount(params.row.id);
+        return (
         <Box sx={{ display: 'flex', gap: 0.5 }}>
+          <IconButton
+            size="small"
+            onClick={() => void openCommunicationCenter(params.row, 'telegram')}
+            title={unreadCount > 0 ? `Сообщения (${unreadCount} новых)` : 'Сообщения клиенту'}
+            sx={{ color: '#3390ec' }}
+          >
+            <Badge badgeContent={unreadCount > 0 ? unreadCount : undefined} color="error" max={9}>
+              <ChatBubbleOutline fontSize="small" />
+            </Badge>
+          </IconButton>
+
           <IconButton
             size="small"
             onClick={() => handleViewOrder(params.row)}
@@ -3613,6 +3539,15 @@ const Orders: React.FC = () => {
             sx={{ color: '#FF6B35' }}
           >
             <Visibility />
+          </IconButton>
+
+          <IconButton
+            size="small"
+            onClick={() => handleAdvancePayment(params.row)}
+            title="Внести аванс"
+            sx={{ color: '#1565C0' }}
+          >
+            <Savings fontSize="small" />
           </IconButton>
 
           <IconButton
@@ -3636,7 +3571,6 @@ const Orders: React.FC = () => {
           <IconButton
             size="small"
             onClick={() => {
-              console.log('Клик по кнопке добавления работы в таблице, params.row:', params.row);
               handleAddWork(params.row);
             }}
             title="Добавить работу или запчасть"
@@ -3657,7 +3591,6 @@ const Orders: React.FC = () => {
           <IconButton
             size="small"
             onClick={() => {
-              console.log('Клик по кнопке выдачи заказа, params.row:', params.row);
               handleDeliveryOrder(params.row);
             }}
             title="Выдача заказа"
@@ -3666,9 +3599,22 @@ const Orders: React.FC = () => {
             <LocalShipping />
           </IconButton>
         </Box>
-      ),
+        );
+      },
     },
-  ];
+  ], [
+    columnLayout.widths,
+    getOrderUnreadTelegramCount,
+    openCommunicationCenter,
+    handleInlineStatusChange,
+    handleViewOrder,
+    handlePayment,
+    handleAdvancePayment,
+    handleEditOrder,
+    handleAddWork,
+    handleDeleteOrder,
+    handleDeliveryOrder,
+  ]);
 
   const columns = React.useMemo(() => {
     const fieldMap = new Map(baseColumns.map((column) => [column.field, column]));
@@ -3855,7 +3801,7 @@ const Orders: React.FC = () => {
                   setFilterScope('active');
                   setFilterStatus('all');
                   setFilterPriority('all');
-                  setPeriodFilter(defaultPeriodFilterValue('month'));
+                  setPeriodFilter(defaultPeriodFilterValue('all'));
                 }}
               >
                 Сбросить
@@ -3887,10 +3833,10 @@ const Orders: React.FC = () => {
               <Button
                 fullWidth
                 variant="outlined"
-                startIcon={<CleaningServices />}
-                onClick={openQuickCleaningDialog}
+                startIcon={<Build />}
+                onClick={() => setIsQuickWorkDialogOpen(true)}
               >
-                Чистка устройства
+                Быстрая работа
               </Button>
             {quickSaleOptions.map((option) => (
                 <Button
@@ -3907,7 +3853,7 @@ const Orders: React.FC = () => {
         </Box>
 
         {/* Orders Table */}
-        <Box sx={{ bgcolor: '#fff' }}>
+        <Box sx={{ bgcolor: 'var(--crm-panel)' }}>
           <Box sx={{ width: '100%', overflowX: 'auto' }}>
             <Box
               component="table"
@@ -3923,7 +3869,7 @@ const Orders: React.FC = () => {
                   <col key={column.field} style={{ width: Number(column.width || 120) }} />
                 ))}
               </colgroup>
-              <Box component="thead" sx={{ bgcolor: '#f8fafc' }}>
+              <Box component="thead" sx={{ bgcolor: 'var(--crm-panel)' }}>
                 <Box component="tr">
                   {columns.map((column) => (
                     <Box
@@ -3934,8 +3880,8 @@ const Orders: React.FC = () => {
                         height: 52,
                         px: 1.5,
                         textAlign: 'left',
-                        borderBottom: '1px solid rgba(15, 23, 42, 0.10)',
-                        color: '#172033',
+                        borderBottom: '1px solid var(--crm-border)',
+                        color: 'text.secondary',
                         fontSize: '0.875rem',
                         fontWeight: 700,
                       }}
@@ -3946,15 +3892,18 @@ const Orders: React.FC = () => {
                 </Box>
               </Box>
               <Box component="tbody">
-                {paginatedOrders.map((order) => (
+                {paginatedOrders.map((order) => {
+                  const unreadCount = getOrderUnreadTelegramCount(order.id);
+                  return (
                   <Box
                     component="tr"
                     key={order.id}
                     onClick={() => handleViewOrder(order)}
                     sx={{
                       cursor: 'pointer',
+                      bgcolor: unreadCount > 0 ? 'rgba(51, 144, 236, 0.07)' : undefined,
                       '&:hover': {
-                        bgcolor: 'rgba(15, 23, 42, 0.025)',
+                        bgcolor: unreadCount > 0 ? 'rgba(51, 144, 236, 0.11)' : 'rgba(15, 23, 42, 0.025)',
                       },
                     }}
                   >
@@ -3978,7 +3927,8 @@ const Orders: React.FC = () => {
                       </Box>
                     ))}
                   </Box>
-                ))}
+                  );
+                })}
                 {paginatedOrders.length === 0 && (
                   <Box component="tr">
                     <Box
@@ -4067,9 +4017,24 @@ const Orders: React.FC = () => {
           {selectedOrder && (
             <Grid container spacing={2} sx={{ mt: 1 }}>
               <Grid item xs={12}>
-                <Typography variant="h6" gutterBottom>
-                  Заказ {selectedOrder.orderNumber}
-                </Typography>
+                <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap">
+                  <Typography variant="h6" gutterBottom>
+                    Заказ {selectedOrder.orderNumber}
+                  </Typography>
+                  {selectedOrder.isWarranty && (
+                    <Chip
+                      size="small"
+                      icon={<Security sx={{ fontSize: 14 }} />}
+                      label="Гарантийный заказ"
+                      sx={{
+                        bgcolor: 'rgba(255, 107, 53, 0.14)',
+                        color: '#E64A19',
+                        fontWeight: 700,
+                        '& .MuiChip-icon': { color: '#E64A19' },
+                      }}
+                    />
+                  )}
+                </Stack>
               </Grid>
               <Grid item xs={12} sm={6}>
                 <Typography variant="subtitle2" color="textSecondary">
@@ -4098,7 +4063,7 @@ const Orders: React.FC = () => {
                   Описание проблемы
                 </Typography>
                 <Typography variant="body1">
-                  {selectedOrder.description}
+                  {getOrderStatedProblem(selectedOrder) || 'Не указано'}
                 </Typography>
               </Grid>
               {selectedOrder.diagnosis && (
@@ -4198,7 +4163,7 @@ const Orders: React.FC = () => {
                     <h2>Заказ ${escapePrintValue(selectedOrder.orderNumber)}</h2>
                     <p>Клиент: ${escapePrintValue(selectedOrder.clientName)}</p>
                     <p>Устройство: ${escapePrintValue(`${selectedOrder.deviceBrand || ''} ${selectedOrder.deviceModel || ''}`.trim())}</p>
-                    <p>Описание: ${escapePrintValue(selectedOrder.description)}</p>
+                    <p>Описание: ${escapePrintValue(getOrderStatedProblem(selectedOrder))}</p>
                     <p>Стоимость: ${escapePrintValue(getOrderTotal(selectedOrder).toLocaleString('ru-RU'))} ₽</p>
                   </body>
                 </html>
@@ -4216,7 +4181,7 @@ const Orders: React.FC = () => {
 
       {/* Payment Dialog */}
       <Dialog open={isPaymentDialogOpen} onClose={() => setIsPaymentDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Оплата заказа</DialogTitle>
+        <DialogTitle>{paymentDialogMode === 'advance' ? 'Внести аванс' : 'Оплата заказа'}</DialogTitle>
         <DialogContent>
           {selectedOrder && (
             <Grid container spacing={2} sx={{ mt: 1 }}>
@@ -4225,7 +4190,9 @@ const Orders: React.FC = () => {
                   Заказ {selectedOrder.orderNumber}
                 </Typography>
                 <Typography variant="body2" color="textSecondary">
-                  К оплате: {getOrderDebt(selectedOrder).toLocaleString('ru-RU')} ₽
+                  {paymentDialogMode === 'advance'
+                    ? `Уже оплачено: ${getOrderPaidAmount(selectedOrder).toLocaleString('ru-RU')} ₽ · Остаток: ${getOrderDebt(selectedOrder).toLocaleString('ru-RU')} ₽`
+                    : `К оплате: ${getOrderDebt(selectedOrder).toLocaleString('ru-RU')} ₽`}
                 </Typography>
               </Grid>
               <Grid item xs={12}>
@@ -4273,7 +4240,7 @@ const Orders: React.FC = () => {
             Отмена
           </Button>
           <Button variant="contained" onClick={handleAddPayment}>
-            Провести оплату
+            {paymentDialogMode === 'advance' ? 'Внести аванс' : 'Провести оплату'}
           </Button>
         </DialogActions>
       </Dialog>
@@ -4290,50 +4257,70 @@ const Orders: React.FC = () => {
             maxWidth: 1540,
             height: '92vh',
             maxHeight: '92vh',
+            display: 'flex',
+            flexDirection: 'column',
           },
         }}
       >
-        <DialogTitle>Просмотр заказа</DialogTitle>
-        <DialogContent dividers sx={{ overflow: 'hidden' }}>
+        <DialogTitle sx={{ flexShrink: 0 }}>Просмотр заказа</DialogTitle>
+        <DialogContent
+          dividers
+          sx={{
+            flex: 1,
+            minHeight: 0,
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
           {selectedOrder && (
-            <Box sx={{ mt: 0, height: '100%' }}>
-              <Grid container spacing={2} alignItems="flex-start" sx={{ height: '100%' }}>
-                <Grid item xs={12} md={4}>
+            <Box sx={{ mt: 0, flex: 1, minHeight: 0, overflow: 'hidden' }}>
+              <Grid
+                container
+                spacing={2}
+                alignItems="stretch"
+                sx={{ height: '100%', minHeight: 0 }}
+              >
+                <Grid item xs={12} md={4} sx={{ height: { xs: 'auto', md: '100%' }, minHeight: { xs: 320, md: 0 }, display: 'flex' }}>
                   <Card
                     sx={{
-                      height: { md: 'calc(88vh - 64px)' },
-                      minHeight: { xs: 320, md: 'calc(88vh - 64px)' },
+                      width: '100%',
+                      height: { xs: 360, md: '100%' },
+                      display: 'flex',
+                      flexDirection: 'column',
                     }}
                   >
-                    <CardContent sx={{ height: '100%', overflowY: 'auto' }}>
+                    <CardContent
+                      sx={{
+                        flex: 1,
+                        minHeight: 0,
+                        overflowY: 'auto',
+                        display: 'flex',
+                        flexDirection: 'column',
+                      }}
+                    >
                       <Typography variant="h6" gutterBottom>История заказа</Typography>
                       <Grid container spacing={1.5} sx={{ mb: 2 }}>
-                        <Grid item xs={12}>
-                          <TextField
-                            fullWidth
-                            multiline
-                            minRows={2}
-                            placeholder="Комментарий для мастера / внутреннее примечание"
-                            value={masterCommentText}
-                            onChange={(e) => setMasterCommentText(e.target.value)}
-                          />
-                        </Grid>
-                        <Grid item xs={12}>
-                          <Button fullWidth variant="contained" onClick={handleAddMasterComment}>
-                            Добавить в историю
-                          </Button>
-                        </Grid>
+                        <OrderMasterCommentField onSubmit={(text) => void handleAddMasterComment(text)} />
                       </Grid>
-                      {(selectedOrder.communicationHistory || []).length > 0 ? (
-                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                          {[...(selectedOrder.communicationHistory || [])]
-                            .slice()
-                            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-                            .map((entry) => (
+                      {(() => {
+                        const internalHistory = [...getOrderInternalHistory(selectedOrder)].sort(
+                          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+                        );
+                        if (internalHistory.length === 0) {
+                          return (
+                            <Typography variant="body2" color="text.secondary">
+                              Пока нет записей. История будет появляться при изменениях заказа, оплатах и комментариях.
+                            </Typography>
+                          );
+                        }
+                        return (
+                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            {internalHistory.map((entry) => (
                               <Card key={entry.id} variant="outlined">
                                 <CardContent sx={{ py: 1.25 }}>
                                   <Typography variant="body2" fontWeight={700}>
-                                    {getHistoryChannelLabel(entry.channel)} • {entry.author}
+                                    {getHistoryChannelLabel(entry.channel, entry)} • {entry.author}
                                   </Typography>
                                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.75 }}>
                                     {new Date(entry.createdAt).toLocaleString('ru-RU')}
@@ -4342,18 +4329,26 @@ const Orders: React.FC = () => {
                                 </CardContent>
                               </Card>
                             ))}
-                        </Box>
-                      ) : (
-                        <Typography variant="body2" color="text.secondary">
-                          Пока нет записей. История будет появляться при изменениях заказа, оплатах, комментариях и сообщениях.
-                        </Typography>
-                      )}
+                          </Box>
+                        );
+                      })()}
                     </CardContent>
                   </Card>
                 </Grid>
 
-                <Grid item xs={12} md={8} sx={{ height: { md: 'calc(88vh - 64px)' } }}>
-              <Box sx={{ height: '100%', overflowY: 'auto', pr: 1 }}>
+                <Grid item xs={12} md={8} sx={{ height: { xs: 'auto', md: '100%' }, minHeight: 0, minWidth: 0, display: 'flex' }}>
+              <Box
+                sx={{
+                  width: '100%',
+                  height: { xs: 'auto', md: '100%' },
+                  maxHeight: { xs: 'none', md: '100%' },
+                  overflowY: 'auto',
+                  overflowX: 'hidden',
+                  pr: 1,
+                  pb: 3,
+                  boxSizing: 'border-box',
+                }}
+              >
               {/* Основная информация о заказе */}
               <Card sx={{ mb: 3 }}>
                 <CardContent>
@@ -4366,14 +4361,10 @@ const Orders: React.FC = () => {
                         <Typography variant="body2" color="text.secondary">
                           Статус:
                         </Typography>
-                        <Chip
-                          label={getStatusOption(selectedOrder.status).label}
-                          size="small"
-                          sx={{
-                            bgcolor: getStatusOption(selectedOrder.status).color,
-                            color: '#fff',
-                            fontWeight: 700,
-                          }}
+                        <StatusBadgeSelector
+                          value={selectedOrder.status}
+                          options={orderStatusOptions}
+                          onChange={(nextStatus) => handleQuickOrderUpdate({ status: nextStatus })}
                         />
                       </Box>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1 }}>
@@ -4391,11 +4382,20 @@ const Orders: React.FC = () => {
                       </Typography>
                     </Grid>
                     <Grid item xs={12} md={6}>
-                      <Typography variant="body2" color="text.secondary">
-                        Стоимость: <strong>{getOrderTotal(selectedOrder).toLocaleString('ru-RU')} ₽</strong>
+                      {Number(selectedOrder.estimatedCost || 0) > 0 && (
+                        <Typography variant="body2" color="text.secondary">
+                          Согласованная стоимость:{' '}
+                          <strong>{Number(selectedOrder.estimatedCost).toLocaleString('ru-RU')} ₽</strong>
+                        </Typography>
+                      )}
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: Number(selectedOrder.estimatedCost || 0) > 0 ? 1 : 0 }}>
+                        Итоговая стоимость: <strong>{getOrderTotal(selectedOrder).toLocaleString('ru-RU')} ₽</strong>
                       </Typography>
                       <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                        Оплачено: <strong>{selectedOrder.isPaid ? 'Да' : 'Нет'}</strong>
+                        Оплачено: <strong>{getOrderPaidAmount(selectedOrder).toLocaleString('ru-RU')} ₽</strong>
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                        Остаток: <strong>{getOrderDebt(selectedOrder).toLocaleString('ru-RU')} ₽</strong>
                       </Typography>
                       {(() => {
                         const earnings = getOrderEarningsBreakdown(selectedOrder);
@@ -4470,7 +4470,7 @@ const Orders: React.FC = () => {
                                     ))}
                                   </Select>
                                 </FormControl>
-                                <Typography variant="body2" fontWeight={700} sx={{ color: '#15803d', whiteSpace: 'nowrap' }}>
+                                <Typography variant="body2" fontWeight={700} color="success.main" sx={{ whiteSpace: 'nowrap' }}>
                                   {row.amount.toLocaleString('ru-RU')} ₽
                                 </Typography>
                               </Box>
@@ -4532,12 +4532,34 @@ const Orders: React.FC = () => {
                                   <Button size="small" variant="outlined" startIcon={<Phone />} onClick={() => handleCallClient(selectedOrder.clientPhone || '', selectedOrder)}>
                                     Позвонить
                                   </Button>
-                                  <Button size="small" variant="outlined" startIcon={<WhatsApp />} onClick={() => handleWhatsAppClient(selectedOrder)} sx={{ color: '#25D366' }}>
-                                    WhatsApp
-                                  </Button>
-                                  <Button size="small" variant="outlined" startIcon={<Telegram />} onClick={() => handleTelegramClient(selectedOrder)}>
-                                    Telegram
-                                  </Button>
+                                  <Badge
+                                    badgeContent={
+                                      selectedOrderUnreadTelegramCount > 0
+                                        ? selectedOrderUnreadTelegramCount
+                                        : undefined
+                                    }
+                                    color="error"
+                                    max={9}
+                                  >
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      startIcon={<ChatBubbleOutline />}
+                                      onClick={() => handleTelegramClient(selectedOrder)}
+                                      title={
+                                        selectedOrderUnreadTelegramCount > 0
+                                          ? `Сообщения (${selectedOrderUnreadTelegramCount} новых)`
+                                          : 'Чат с клиентом'
+                                      }
+                                      sx={{
+                                        color: '#3390ec',
+                                        borderColor: '#3390ec',
+                                        '&:hover': { borderColor: '#2b7fd4', bgcolor: 'rgba(51, 144, 236, 0.06)' },
+                                      }}
+                                    >
+                                      Чат
+                                    </Button>
+                                  </Badge>
                                 </Stack>
                               </Stack>
                             </Grid>
@@ -4545,6 +4567,9 @@ const Orders: React.FC = () => {
                               <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                                 <Button size="small" variant="outlined" startIcon={<Build />} onClick={() => handleAddWork(selectedOrder)}>
                                   Добавить работу
+                                </Button>
+                                <Button size="small" variant="outlined" startIcon={<Savings />} onClick={() => handleAdvancePayment(selectedOrder)}>
+                                  Внести аванс
                                 </Button>
                                 <Button size="small" variant="outlined" startIcon={<AttachMoney />} onClick={() => handlePayment(selectedOrder)}>
                                   Оплата
@@ -4600,24 +4625,35 @@ const Orders: React.FC = () => {
                         >
                           Позвонить
                         </Button>
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          startIcon={<WhatsApp />}
-                          onClick={() => handleWhatsAppClient(selectedOrder)}
-                          sx={{ color: '#25D366', whiteSpace: 'nowrap' }}
+                        <Badge
+                          badgeContent={
+                            selectedOrderUnreadTelegramCount > 0
+                              ? selectedOrderUnreadTelegramCount
+                              : undefined
+                          }
+                          color="error"
+                          max={9}
                         >
-                          WhatsApp
-                        </Button>
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          startIcon={<Telegram />}
-                          onClick={() => handleTelegramClient(selectedOrder)}
-                          sx={{ color: '#0088cc', whiteSpace: 'nowrap' }}
-                        >
-                          Telegram
-                        </Button>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            startIcon={<ChatBubbleOutline />}
+                            onClick={() => handleTelegramClient(selectedOrder)}
+                            title={
+                              selectedOrderUnreadTelegramCount > 0
+                                ? `Сообщения (${selectedOrderUnreadTelegramCount} новых)`
+                                : 'Чат с клиентом'
+                            }
+                            sx={{
+                              color: '#3390ec',
+                              borderColor: '#3390ec',
+                              whiteSpace: 'nowrap',
+                              '&:hover': { borderColor: '#2b7fd4', bgcolor: 'rgba(51, 144, 236, 0.06)' },
+                            }}
+                          >
+                            Чат
+                          </Button>
+                        </Badge>
                       </Box>
                     </Grid>
                   </Grid>
@@ -4645,7 +4681,7 @@ const Orders: React.FC = () => {
                         S/N: <strong>{selectedOrder.deviceSerial || 'Не указан'}</strong>
                       </Typography>
                       <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                        Пароль: <strong>{(selectedOrder as any).devicePassword || 'Не указан'}</strong>
+                        пароль: <strong>{selectedOrder.devicePassword || '—'}</strong>
                       </Typography>
                     </Grid>
                   </Grid>
@@ -4657,7 +4693,7 @@ const Orders: React.FC = () => {
                 <CardContent>
                   <Typography variant="h6" gutterBottom>Описание проблемы</Typography>
                   <Typography variant="body2">
-                    {selectedOrder.description || 'Описание не указано'}
+                    {getOrderStatedProblem(selectedOrder) || 'Описание не указано'}
                   </Typography>
                 </CardContent>
               </Card>
@@ -4681,18 +4717,8 @@ const Orders: React.FC = () => {
                   {selectedOrder.parts && selectedOrder.parts.length > 0 ? (
                     <Box>
                       {selectedOrder.parts.map((part, index) => {
-                        const isAdditionalService =
-                          part.partId === 'screen_protection' || part.partId === 'cleaning';
-                        const isWorkItem =
-                          (part as any).workType === 'work_with_part' || (part as any).workType === 'work_only';
                         const linkedPart = (part as any).partInfo;
-                        const itemTitle = isAdditionalService
-                          ? part.partId === 'screen_protection'
-                            ? 'Защита экрана'
-                            : 'Чистка устройства'
-                          : isWorkItem
-                            ? (part as any).workName
-                            : linkedPart?.name || `Позиция #${index + 1}`;
+                        const itemTitle = getOrderLineTitle(part as any);
 
                         return (
                           <Box
@@ -4703,7 +4729,8 @@ const Orders: React.FC = () => {
                               alignItems: 'flex-start',
                               gap: 2,
                               py: 1.5,
-                              borderBottom: index < selectedOrder.parts!.length - 1 ? '1px solid #e0e0e0' : 'none'
+                              borderBottom: index < selectedOrder.parts!.length - 1 ? '1px solid' : 'none',
+                              borderColor: 'divider',
                             }}
                           >
                             <Box sx={{ minWidth: 0 }}>
@@ -4720,7 +4747,7 @@ const Orders: React.FC = () => {
                               )}
                               {(part as any).workType && (
                                 <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                                  Тип: {(part as any).workType === 'work_with_part' ? 'Работа с запчастью' : 'Работа без запчасти'}
+                                  Тип: {getWorkTypeLabel((part as any).workType)}
                                 </Typography>
                               )}
                             </Box>
@@ -4760,14 +4787,15 @@ const Orders: React.FC = () => {
               </Card>
 
               {/* Действия */}
-              <Card>
-                <CardContent>
+              <Card sx={{ overflow: 'visible' }}>
+                <CardContent sx={{ overflow: 'visible' }}>
                   <Typography variant="h6" gutterBottom>Действия</Typography>
-                  <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                  <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap" sx={{ width: '100%' }}>
                     <Button
                       variant="contained"
                       startIcon={<Print />}
                       onClick={() => handleViewDocument(selectedOrder, 'acceptance')}
+                      sx={{ flex: { xs: '1 1 100%', sm: '1 1 auto' }, maxWidth: '100%' }}
                     >
                       Печать акта приема-передачи
                     </Button>
@@ -4776,6 +4804,7 @@ const Orders: React.FC = () => {
                         variant="outlined"
                         startIcon={<Print />}
                         onClick={() => handleViewDocument(selectedOrder, 'completion')}
+                        sx={{ flex: { xs: '1 1 100%', sm: '1 1 auto' }, maxWidth: '100%' }}
                       >
                         Печать акта выполненных работ
                       </Button>
@@ -4787,10 +4816,11 @@ const Orders: React.FC = () => {
                         setIsOrderViewDialogOpen(false);
                         handleEditOrder(selectedOrder);
                       }}
+                      sx={{ flex: { xs: '1 1 100%', sm: '1 1 auto' }, maxWidth: '100%' }}
                     >
                       Редактировать заказ
                     </Button>
-                  </Box>
+                  </Stack>
                 </CardContent>
               </Card>
               </Box>
@@ -4799,10 +4829,20 @@ const Orders: React.FC = () => {
             </Box>
           )}
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{ px: 3, py: 2, gap: 1, flexWrap: 'wrap', flexShrink: 0 }}>
           <Button onClick={() => setIsOrderViewDialogOpen(false)}>
             Закрыть
           </Button>
+          {selectedOrder && (
+            <>
+              <Button variant="outlined" startIcon={<Savings />} onClick={() => handleAdvancePayment(selectedOrder)}>
+                Внести аванс
+              </Button>
+              <Button variant="contained" startIcon={<AttachMoney />} onClick={() => handlePayment(selectedOrder)}>
+                Оплата
+              </Button>
+            </>
+          )}
         </DialogActions>
       </Dialog>
 
@@ -4811,608 +4851,325 @@ const Orders: React.FC = () => {
         onClose={() => setIsCommunicationDialogOpen(false)}
         maxWidth="sm"
         fullWidth
+        PaperProps={{
+          sx: communicationDialogPaperSx,
+        }}
       >
-        <DialogTitle>
-          {communicationChannel === 'whatsapp' ? 'Чат WhatsApp в CRM' : 'Чат Telegram в CRM'}
-        </DialogTitle>
-        <DialogContent>
-          {selectedOrder && (
-            <Box sx={{ mt: 1 }}>
-              <Card variant="outlined" sx={{ mb: 2 }}>
-                <CardContent>
-                  <Typography variant="subtitle1" gutterBottom>
-                    {selectedOrder.clientName || 'Клиент'}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    Телефон: {formatPhone(selectedOrder.clientPhone) || 'Не указан'}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    Заказ: {selectedOrder.orderNumber}
-                  </Typography>
-                </CardContent>
-              </Card>
-
-              <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
-                <Button
-                  variant={communicationChannel === 'whatsapp' ? 'contained' : 'outlined'}
-                  startIcon={<WhatsApp />}
-                  onClick={() => {
-                    setCommunicationChannel('whatsapp');
-                    setCommunicationMessage(buildCommunicationTemplate(selectedOrder, 'whatsapp'));
-                  }}
-                >
-                  WhatsApp
-                </Button>
-                <Button
-                  variant={communicationChannel === 'telegram' ? 'contained' : 'outlined'}
-                  startIcon={<Telegram />}
-                  onClick={() => {
-                    setCommunicationChannel('telegram');
-                    setCommunicationMessage(buildCommunicationTemplate(selectedOrder, 'telegram'));
-                  }}
-                >
-                  Telegram
-                </Button>
-              </Box>
-
-              <TextField
-                fullWidth
-                multiline
-                minRows={5}
-                label="Сообщение клиенту"
-                value={communicationMessage}
-                onChange={(e) => setCommunicationMessage(e.target.value)}
-                helperText="Сообщение сохраняется в карточке заказа и доступно сотрудникам внутри CRM"
-              />
-
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" gutterBottom>
-                  История общения
+        {selectedOrder && (
+          <>
+            <Box
+              sx={{
+                px: 1.5,
+                py: 1.25,
+                bgcolor: '#3390ec',
+                color: '#fff',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1.25,
+                flexShrink: 0,
+              }}
+            >
+              <Avatar
+                sx={{
+                  width: 42,
+                  height: 42,
+                  bgcolor: 'rgba(255,255,255,0.22)',
+                  fontSize: 15,
+                  fontWeight: 700,
+                }}
+              >
+                {getClientInitials(selectedOrder.clientName)}
+              </Avatar>
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography variant="subtitle1" fontWeight={700} noWrap>
+                  {selectedOrder.clientName || 'Клиент'}
                 </Typography>
-                {(selectedOrder.communicationHistory || []).length > 0 ? (
-                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                    {[...(selectedOrder.communicationHistory || [])]
-                      .slice()
-                      .reverse()
-                      .map((entry) => (
-                        <Card key={entry.id} variant="outlined">
-                          <CardContent sx={{ py: 1.5 }}>
-                            <Typography variant="body2" fontWeight={600}>
-                              {getHistoryChannelLabel(entry.channel)} • {entry.author}
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
-                              {new Date(entry.createdAt).toLocaleString('ru-RU')}
-                            </Typography>
-                            <Typography variant="body2">{entry.message}</Typography>
-                          </CardContent>
-                        </Card>
-                      ))}
-                  </Box>
-                ) : (
-                  <Typography variant="body2" color="text.secondary">
-                    Пока нет сохраненных сообщений по этому заказу.
-                  </Typography>
-                )}
+                <Typography variant="caption" sx={{ opacity: 0.9, display: 'block' }} noWrap>
+                  {formatPhone(selectedOrder.clientPhone) || 'Телефон не указан'} • заказ {selectedOrder.orderNumber}
+                </Typography>
               </Box>
+              {communicationChannel === 'telegram' && getExternalTelegramLink(selectedOrder, '') ? (
+                <IconButton
+                  size="small"
+                  sx={{ color: '#fff' }}
+                  onClick={() => openExternalTelegram(selectedOrder, '')}
+                  title="Открыть в Telegram"
+                >
+                  <Telegram fontSize="small" />
+                </IconButton>
+              ) : null}
+              <IconButton
+                size="small"
+                sx={{ color: '#fff' }}
+                onClick={() => setIsCommunicationDialogOpen(false)}
+                disabled={isSendingCommunication}
+              >
+                <Close fontSize="small" />
+              </IconButton>
             </Box>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsCommunicationDialogOpen(false)}>Закрыть</Button>
-          <Button
-            variant="outlined"
-            startIcon={communicationChannel === 'whatsapp' ? <WhatsApp /> : <Telegram />}
-            disabled={!selectedOrder || !getExternalMessengerLink(selectedOrder, communicationChannel, communicationMessage)}
-            onClick={() => {
-              if (!selectedOrder) return;
-              openExternalMessenger(selectedOrder, communicationChannel, communicationMessage);
-            }}
-          >
-            {getExternalMessengerLabel(communicationChannel)}
-          </Button>
-          <Button
-            variant="contained"
-            onClick={handleSaveCommunication}
-          >
-            Сохранить сообщение
-          </Button>
-        </DialogActions>
-      </Dialog>
 
-      {/* Edit Order Dialog */}
-      <Dialog open={isEditOrderDialogOpen} onClose={() => setIsEditOrderDialogOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>Редактирование заказа</DialogTitle>
-        <DialogContent>
-          {selectedOrder && (
-            <Box sx={{ mt: 2 }}>
-              <Grid container spacing={3}>
-                {/* Информация о клиенте */}
-                <Grid item xs={12}>
-                  <Typography variant="h6" gutterBottom>Информация о клиенте</Typography>
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="Имя клиента"
-                    defaultValue={selectedOrder.clientName}
-                    disabled
-                    helperText="Имя клиента нельзя изменить из этого окна"
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="Телефон клиента"
-                    defaultValue={selectedOrder.clientPhone}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, clientPhone: e.target.value } : null);
-                    }}
-                  />
-                </Grid>
-
-                {/* Информация об устройстве */}
-                <Grid item xs={12}>
-                  <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>Информация об устройстве</Typography>
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="Бренд устройства"
-                    defaultValue={selectedOrder.deviceBrand}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, deviceBrand: e.target.value } : null);
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="Модель устройства"
-                    defaultValue={selectedOrder.deviceModel}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, deviceModel: e.target.value } : null);
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="Цвет устройства"
-                    defaultValue={selectedOrder.deviceColor}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, deviceColor: e.target.value } : null);
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="IMEI"
-                    defaultValue={selectedOrder.deviceImei}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, deviceImei: e.target.value } : null);
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="Серийный номер"
-                    defaultValue={selectedOrder.deviceSerial}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, deviceSerial: e.target.value } : null);
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="Пароль устройства"
-                    defaultValue={(selectedOrder as any).devicePassword || ''}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, devicePassword: e.target.value } as any : null);
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="Внешний вид"
-                    defaultValue={selectedOrder.deviceExternalCondition}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, deviceExternalCondition: e.target.value } : null);
-                    }}
-                  />
-                </Grid>
-
-                {/* Информация о заказе */}
-                <Grid item xs={12}>
-                  <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>Информация о заказе</Typography>
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <FormControl fullWidth>
-                    <InputLabel>Статус заказа</InputLabel>
-                    <Select
-                      value={selectedOrder.status}
-                      label="Статус заказа"
-                      onChange={(e) => {
-                        setSelectedOrder(prev => prev ? { ...prev, status: e.target.value as any } : null);
-                      }}
-                    >
-                      {orderStatusOptions.map((option) => (
-                        <MenuItem key={option.value} value={option.value}>
-                          {option.label}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <FormControl fullWidth>
-                    <InputLabel>Приоритет</InputLabel>
-                    <Select
-                      value={selectedOrder.priority}
-                      label="Приоритет"
-                      onChange={(e) => {
-                        setSelectedOrder(prev => prev ? { ...prev, priority: e.target.value as any } : null);
-                      }}
-                    >
-                      <MenuItem value="low">Низкий</MenuItem>
-                      <MenuItem value="medium">Средний</MenuItem>
-                      <MenuItem value="high">Высокий</MenuItem>
-                      <MenuItem value="urgent">Срочный</MenuItem>
-                    </Select>
-                  </FormControl>
-                </Grid>
-                <Grid item xs={12} md={4}>
-                  <FormControl fullWidth>
-                    <InputLabel>Исполнитель</InputLabel>
-                    <Select
-                      value={selectedOrder.technicianId || ''}
-                      label="Исполнитель"
-                      onChange={(e) => {
-                        const technician = assigneeOptions.find((option) => option.id === e.target.value);
-                        setSelectedOrder(prev => prev ? {
-                          ...prev,
-                          technicianId: e.target.value,
-                          technicianName: technician?.name || '',
-                        } : null);
-                      }}
-                    >
-                      {assigneeOptions.map((option) => (
-                        <MenuItem key={option.id} value={option.id}>
-                          {option.name}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                </Grid>
-                <Grid item xs={12} md={4}>
-                  <FormControl fullWidth>
-                    <InputLabel>Менеджер приема</InputLabel>
-                    <Select
-                      value={selectedOrder.intakeManagerName || ''}
-                      label="Менеджер приема"
-                      onChange={(e) => {
-                        setSelectedOrder(prev => prev ? { ...prev, intakeManagerName: e.target.value } : null);
-                      }}
-                    >
-                      {assigneeOptions.map((option) => (
-                        <MenuItem key={option.id} value={option.name}>
-                          {option.name}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                </Grid>
-                <Grid item xs={12} md={4}>
-                  <FormControl fullWidth>
-                    <InputLabel>Менеджер выдачи</InputLabel>
-                    <Select
-                      value={selectedOrder.deliveryManagerName || ''}
-                      label="Менеджер выдачи"
-                      onChange={(e) => {
-                        setSelectedOrder(prev => prev ? { ...prev, deliveryManagerName: e.target.value } : null);
-                      }}
-                    >
-                      {assigneeOptions.map((option) => (
-                        <MenuItem key={option.id} value={option.name}>
-                          {option.name}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="Ориентировочная стоимость"
-                    type="number"
-                    defaultValue={selectedOrder.estimatedCost}
-                    InputProps={{
-                      startAdornment: <InputAdornment position="start">₽</InputAdornment>,
-                    }}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, estimatedCost: Number(e.target.value) } : null);
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField
-                    fullWidth
-                    label="Финальная стоимость"
-                    type="number"
-                    defaultValue={selectedOrder.finalCost || ''}
-                    InputProps={{
-                      startAdornment: <InputAdornment position="start">₽</InputAdornment>,
-                    }}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, finalCost: Number(e.target.value) } : null);
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12}>
-                  <TextField
-                    fullWidth
-                    label="Описание проблемы"
-                    multiline
-                    rows={3}
-                    defaultValue={selectedOrder.description}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, description: e.target.value } : null);
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12}>
-                  <TextField
-                    fullWidth
-                    label="Диагностика"
-                    multiline
-                    rows={2}
-                    defaultValue={selectedOrder.diagnosis}
-                    onChange={(e) => {
-                      setSelectedOrder(prev => prev ? { ...prev, diagnosis: e.target.value } : null);
-                    }}
-                  />
-                </Grid>
-              </Grid>
-            </Box>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsEditOrderDialogOpen(false)}>
-            Отмена
-          </Button>
-          <Button 
-            variant="contained" 
-            onClick={() => {
-              if (selectedOrder) {
-                handleSaveOrderEdit(selectedOrder);
-              }
-            }}
-          >
-            Сохранить изменения
-          </Button>
-          <Button 
-            variant="outlined" 
-            startIcon={<Print />}
-            onClick={() => {
-              if (selectedOrder) {
-                handleViewDocument(selectedOrder, 'acceptance');
-              }
-            }}
-          >
-            Печать акта
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Add Work Dialog */}
-      <Dialog open={isAddWorkDialogOpen} onClose={() => setIsAddWorkDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>{editingWorkItemId ? 'Редактировать работу' : 'Добавить работу'}</DialogTitle>
-        <DialogContent>
-          <Box sx={{ mt: 2 }}>
-            <Grid container spacing={3}>
-              {/* Work title */}
-              <Grid item xs={12}>
-                <Autocomplete
-                  freeSolo
-                  options={workNameOptions}
-                  value={workName}
-                  onChange={(event, newValue) => {
-                    setWorkName(newValue || '');
-                  }}
-                  onInputChange={(event, newInputValue) => {
-                    setWorkName(newInputValue);
-                  }}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      label="Название работы"
-                      placeholder="Выберите из списка или введите свое название"
-                      helperText="Выберите популярную работу или введите название вручную"
-                    />
-                  )}
-                  renderOption={(props, option) => {
-                    const { key, ...optionProps } = props;
-                    return (
-                      <Box component="li" key={`${option}-${key}`} {...optionProps}>
-                        <Typography variant="body1">{option}</Typography>
-                      </Box>
-                    );
-                  }}
-                />
-              </Grid>
-
-              {/* Attach part */}
-              <Grid item xs={12}>
-                <Card sx={{ p: 2, bgcolor: 'grey.50' }}>
-                  <Typography variant="subtitle1" gutterBottom>
-                    {editingWorkItemId ? 'Запчасть в работе' : 'Добавить запчасть к работе'}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                    {editingWorkItemId
-                      ? 'При редактировании цена и количество меняются без повторного списания склада.'
-                      : 'Если работа требует запчасти, выберите ее из склада.'}
-                  </Typography>
+            <Box
+              sx={(theme) => ({
+                px: 1.5,
+                py: 1,
+                bgcolor: theme.palette.mode === 'dark' ? theme.palette.background.default : '#f4f4f5',
+                borderBottom: '1px solid',
+                borderColor: 'divider',
+                display: 'flex',
+                gap: 0.75,
+                flexShrink: 0,
+              })}
+            >
+              <Button
+                size="small"
+                variant={communicationChannel === 'telegram' ? 'contained' : 'outlined'}
+                startIcon={<Telegram />}
+                onClick={() => setCommunicationChannel('telegram')}
+                sx={
+                  communicationChannel === 'telegram'
+                    ? { bgcolor: '#3390ec', boxShadow: 'none', '&:hover': { bgcolor: '#2b7fd4' } }
+                    : undefined
+                }
+              >
+                Telegram
+              </Button>
+              <Button
+                size="small"
+                variant={communicationChannel === 'sms' ? 'contained' : 'outlined'}
+                startIcon={<Sms />}
+                onClick={() => setCommunicationChannel('sms')}
+                sx={
+                  communicationChannel === 'sms'
+                    ? { bgcolor: '#3390ec', boxShadow: 'none', '&:hover': { bgcolor: '#2b7fd4' } }
+                    : undefined
+                }
+              >
+                SMS
+              </Button>
+              {communicationChannel === 'telegram' &&
+              crmSettings.integrations.telegramConnected &&
+              getTelegramBotLink(selectedOrder) ? (
+                <Stack direction="row" spacing={0.5} sx={{ ml: 'auto', flexShrink: 0 }}>
                   <Button
-                    variant={selectedPart ? "contained" : "outlined"}
-                    fullWidth
-                    onClick={handleSearchParts}
-                    disabled={Boolean(editingWorkItemId)}
-                    startIcon={<Search />}
-                    sx={{ mb: 1 }}
+                    size="small"
+                    variant="outlined"
+                    onClick={() => {
+                      const link = getTelegramBotLink(selectedOrder);
+                      if (link) {
+                        window.location.assign(link);
+                      }
+                    }}
+                    sx={{ bgcolor: 'background.paper', minWidth: 0, px: 1 }}
                   >
-                    {selectedPart ? `Выбрана: ${selectedPart.name}` : 'Выбрать запчасть'}
+                    Открыть
                   </Button>
-                  {selectedPart && (
-                    <Box sx={{ mt: 1 }}>
-                      <Typography variant="body2" color="text.secondary">
-                        Цена запчасти: {selectedPart.price} ₽ • Остаток: {selectedPart.stock} шт.
-                      </Typography>
-                      <Button
-                        size="small"
-                        onClick={() => setSelectedPart(null)}
-                        disabled={Boolean(editingWorkItemId)}
-                        sx={{ mt: 1 }}
-                      >
-                        Убрать запчасть
-                      </Button>
-                    </Box>
-                  )}
-                </Card>
-              </Grid>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<ContentCopy sx={{ fontSize: 16 }} />}
+                    onClick={() => void copyTelegramBotLink(selectedOrder)}
+                    sx={{ bgcolor: 'background.paper', minWidth: 0, px: 1 }}
+                  >
+                    Копировать
+                  </Button>
+                </Stack>
+              ) : null}
+            </Box>
 
-              {/* Selected part */}
-              {selectedPart && (
-                <Grid item xs={12}>
-                  <Card sx={{ p: 2, bgcolor: 'primary.light', color: 'primary.contrastText' }}>
-                    <Typography variant="subtitle1" fontWeight="bold">
-                      {selectedPart.name}
-                    </Typography>
-                    <Typography variant="body2">
-                      Категория: {selectedPart.category} | Бренд: {selectedPart.brand}
-                    </Typography>
-                    <Typography variant="body2">
-                      Цена: {selectedPart.price} ₽ | На складе: {selectedPart.stock} шт.
-                    </Typography>
-                  </Card>
-                </Grid>
-              )}
-
-              {/* Price */}
-              <Grid item xs={12} md={6}>
-                <TextField
-                  fullWidth
-                  label="Цена за единицу"
-                  type="number"
-                  value={workPrice}
-                  onChange={(e) => setWorkPrice(e.target.value)}
-                  helperText="Можно указать 0 ₽ для бесплатной работы"
-                  InputProps={{
-                    startAdornment: <InputAdornment position="start">₽</InputAdornment>,
-                  }}
-                />
-              </Grid>
-
-              <Grid item xs={12}>
-                <Card sx={{ p: 2, bgcolor: '#f8fafc', border: '1px solid #e2e8f0' }}>
-                  <Typography variant="body2" color="text.secondary">
-                    Себестоимость запчасти: <strong>{partCostPreview.toLocaleString('ru-RU')} ₽</strong>
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                    Маржа по работе: <strong>{marginPreview.toLocaleString('ru-RU')} ₽</strong>
-                  </Typography>
-                  <Box sx={{ mt: 1.5, pt: 1.5, borderTop: '1px dashed #cbd5e1' }}>
-                    {previewEarningsRows.map((row) => (
+            {communicationChannel === 'telegram' && crmSettings.integrations.telegramConnected && (
+              getClientTelegramChatId(selectedOrder) ? (
+                <Alert severity="success" sx={{ borderRadius: 0, py: 0.5 }}>
+                  Telegram клиента привязан — можно писать в чат.
+                  {getTelegramBotLink(selectedOrder) ? (
+                    <>
+                      {' '}
                       <Box
-                        key={row.key}
+                        component="button"
+                        type="button"
+                        onClick={() => window.location.assign(getTelegramBotLink(selectedOrder))}
                         sx={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          gap: 2,
-                          mt: row.key === 'technician' ? 0 : 0.75,
+                          display: 'block',
+                          wordBreak: 'break-all',
+                          mt: 0.5,
+                          color: 'inherit',
+                          background: 'none',
+                          border: 'none',
+                          p: 0,
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          textDecoration: 'underline',
                         }}
                       >
-                        <Typography variant="body2" color="text.secondary" noWrap>
-                          {row.label}: <strong>{row.name}</strong> ({row.rate}%)
-                        </Typography>
-                        <Typography variant="body2" fontWeight={700} sx={{ color: '#15803d', whiteSpace: 'nowrap' }}>
-                          {row.amount.toLocaleString('ru-RU')} ₽
-                        </Typography>
+                        {getTelegramBotLink(selectedOrder)}
                       </Box>
-                    ))}
+                    </>
+                  ) : null}
+                </Alert>
+              ) : getTelegramBotLink(selectedOrder) ? (
+                <Alert severity="warning" sx={{ borderRadius: 0, py: 0.5 }}>
+                  Отправьте клиенту ссылку (удержите для копирования на телефоне):
+                  <Box
+                    component="button"
+                    type="button"
+                    onClick={() => window.location.assign(getTelegramBotLink(selectedOrder))}
+                    sx={{
+                      display: 'block',
+                      wordBreak: 'break-all',
+                      mt: 0.5,
+                      fontWeight: 600,
+                      background: 'none',
+                      border: 'none',
+                      p: 0,
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                      color: 'inherit',
+                      textDecoration: 'underline',
+                    }}
+                  >
+                    {getTelegramBotLink(selectedOrder)}
                   </Box>
-                </Card>
-              </Grid>
+                </Alert>
+              ) : (
+                <Alert severity="warning" sx={{ borderRadius: 0, py: 0.5 }}>
+                  Подключите бота в настройках.
+                </Alert>
+              )
+            )}
 
-              {/* Quantity */}
-              <Grid item xs={12} md={6}>
-                <TextField
-                  fullWidth
-                  label="Количество"
-                  type="number"
-                  value={workQuantity}
-                  onChange={(e) => setWorkQuantity(Number(e.target.value))}
-                  inputProps={{ min: 1 }}
-                />
-              </Grid>
+            {communicationChannel === 'sms' &&
+              (!crmSettings.integrations.smsConnected ||
+                crmSettings.integrations.smsProvider === 'none') && (
+                <Alert severity="warning" sx={{ borderRadius: 0, py: 0.5 }}>
+                  Подключите SMS-провайдера в настройках, чтобы отправлять сообщения.
+                </Alert>
+              )}
 
-              <Grid item xs={12} md={6}>
-                <Autocomplete
-                  freeSolo
-                  options={warrantyDayOptions}
-                  value={workWarrantyDays}
-                  inputValue={workWarrantyDays}
-                  onChange={(_, value) => setWorkWarrantyDays(value ?? '')}
-                  onInputChange={(_, value) => setWorkWarrantyDays(value)}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      fullWidth
-                      label="Гарантия, дней"
-                      type="number"
-                      inputProps={{
-                        ...params.inputProps,
-                        min: 1,
-                      }}
-                    />
-                  )}
-                />
-              </Grid>
-
-              {/* Total */}
-              <Grid item xs={12}>
-                <Card sx={{ p: 2, bgcolor: 'grey.100' }}>
-                  <Typography variant="h6" textAlign="center">
-                    Итого: {workTotalPreview.toLocaleString('ru-RU')} ₽
+            <Box sx={communicationChatAreaSx}>
+              {getChannelCommunicationHistory(selectedOrder, communicationChannel).length === 0 ? (
+                <Box sx={{ m: 'auto', textAlign: 'center', color: 'text.secondary', px: 2 }}>
+                  <Typography variant="body2">
+                    {communicationChannel === 'sms' ? 'Пока нет SMS' : 'Пока нет сообщений'}
                   </Typography>
-                </Card>
-              </Grid>
-            </Grid>
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsAddWorkDialogOpen(false)}>
-            Отмена
-          </Button>
-          <Button 
-            variant="contained" 
-            onClick={handleAddWorkToOrder}
-            disabled={!workName || !workPrice.trim() || Number(workPrice) < 0 || workQuantity <= 0 || Number(workWarrantyDays) <= 0}
-          >
-            {editingWorkItemId ? 'Сохранить' : 'Добавить работу'}
-          </Button>
-        </DialogActions>
+                  <Typography variant="caption">
+                    {communicationChannel === 'sms'
+                      ? 'Отправьте SMS клиенту — переписка появится здесь'
+                      : 'Напишите клиенту первым сообщением ниже'}
+                  </Typography>
+                </Box>
+              ) : (
+                [...getChannelCommunicationHistory(selectedOrder, communicationChannel)]
+                  .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+                  .map((entry) => {
+                    const inbound = isInboundCommunicationEntry(entry);
+                    const bubbleText = formatCommunicationBubbleText(entry);
+                    const bubbleStyle = getChatBubbleStyles(theme, {
+                      inbound,
+                      channel: communicationChannel,
+                    });
+                    return (
+                      <Box
+                        key={entry.id}
+                        sx={{
+                          display: 'flex',
+                          justifyContent: inbound ? 'flex-start' : 'flex-end',
+                          alignItems: 'flex-end',
+                          gap: 0.75,
+                        }}
+                      >
+                        {inbound ? (
+                          <Avatar
+                            sx={{
+                              width: 28,
+                              height: 28,
+                              fontSize: 11,
+                              bgcolor: communicationChannel === 'sms' ? '#f5a623' : '#7baaf7',
+                              mb: 0.25,
+                            }}
+                          >
+                            {getClientInitials(selectedOrder.clientName)}
+                          </Avatar>
+                        ) : null}
+                        <Box
+                          sx={{
+                            maxWidth: '78%',
+                            px: 1.25,
+                            py: 0.75,
+                            borderRadius: inbound ? '16px 16px 16px 4px' : '16px 16px 4px 16px',
+                            bgcolor: bubbleStyle.bgcolor,
+                            color: bubbleStyle.color,
+                            boxShadow: bubbleStyle.boxShadow,
+                          }}
+                        >
+                          <Typography
+                            variant="body2"
+                            sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'inherit' }}
+                          >
+                            {bubbleText}
+                          </Typography>
+                          <Typography
+                            variant="caption"
+                            sx={{
+                              display: 'block',
+                              textAlign: 'right',
+                              color: bubbleStyle.timestampColor,
+                              fontSize: 11,
+                              mt: 0.25,
+                              lineHeight: 1.2,
+                            }}
+                          >
+                            {new Date(entry.createdAt).toLocaleTimeString('ru-RU', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </Typography>
+                        </Box>
+                      </Box>
+                    );
+                  })
+              )}
+              <div ref={chatMessagesEndRef} />
+            </Box>
+
+            <OrderCommunicationComposer
+              channel={communicationChannel}
+              sending={isSendingCommunication}
+              onSend={handleSendCommunication}
+            />
+          </>
+        )}
       </Dialog>
 
+      <OrderEditDialog
+        open={isEditOrderDialogOpen}
+        order={selectedOrder}
+        orderStatusOptions={orderStatusOptions}
+        assigneeOptions={assigneeOptions}
+        onClose={() => setIsEditOrderDialogOpen(false)}
+        onSave={handleSaveOrderEdit}
+        onPrintAcceptance={(order) => handleViewDocument(order, 'acceptance')}
+      />
+      <OrderAddWorkDialog
+        key={addWorkFormKey}
+        open={isAddWorkDialogOpen}
+        order={selectedOrder}
+        editingWorkItemId={editingWorkItemId}
+        selectedPart={selectedPart}
+        workNameOptions={workNameOptions}
+        initialValues={addWorkInitialForm}
+        onClose={() => {
+          setIsAddWorkDialogOpen(false);
+          resetAddWorkForm();
+        }}
+        onSearchParts={handleSearchParts}
+        onClearPart={() => setSelectedPart(null)}
+        onSubmit={(values) => void handleAddWorkToOrder(values)}
+      />
       {/* Search Parts Dialog */}
       <Dialog open={isSearchPartsDialogOpen} onClose={() => setIsSearchPartsDialogOpen(false)} maxWidth="lg" fullWidth>
         <DialogTitle component="div">
           <Box display="flex" alignItems="center" justifyContent="space-between" gap={2}>
             <Typography variant="h6" fontWeight={700}>Поиск запчастей на складе</Typography>
-            <Button variant="contained" startIcon={<Add />} onClick={() => setIsQuickReceiveDialogOpen(true)}>
+            <Button variant="contained" startIcon={<Add />} onClick={() => openQuickReceiveDialog({ name: partsSearchTerm.trim() })}>
               Быстрое оприходование
             </Button>
           </Box>
@@ -5509,25 +5266,20 @@ const Orders: React.FC = () => {
                   {filteredParts.map((part) => (
                     <Card
                       key={part.id}
-                      sx={{
-                        mb: 1.5,
-                        cursor: 'pointer',
-                        border: selectedPart?.id === part.id ? '2px solid #FF6B35' : '1px solid #e0e0e0',
-                        '&:hover': { bgcolor: 'grey.50' }
-                      }}
+                      sx={mergeSx({ mb: 1.5 }, selectableCardSx(selectedPart?.id === part.id))}
                       onClick={() => {
                         if (part.stock <= 0) {
-                          setQuickPartName(part.name);
-                          setQuickPartCategory(part.category || 'Прочее');
-                          setQuickPartBrand(part.brand || '');
-                          setQuickPartModel(part.model || '');
-                          setQuickPartWholesalePrice(String((part.wholesalePrice ?? part.price) || ''));
-                          setIsQuickReceiveDialogOpen(true);
+                          openQuickReceiveDialog({
+                            name: part.name,
+                            category: part.category || 'Прочее',
+                            brand: part.brand || '',
+                            model: part.model || '',
+                            wholesalePrice: String((part.wholesalePrice ?? part.price) || ''),
+                          });
                           return;
                         }
 
                         setSelectedPart(part);
-                        setWorkName(part.name);
                         setIsSearchPartsDialogOpen(false);
                       }}
                     >
@@ -5553,7 +5305,7 @@ const Orders: React.FC = () => {
                   {filteredParts.length === 0 && (
                     <Box sx={{ textAlign: 'center', py: 5 }}>
                       <Typography variant="body1" color="text.secondary">Запчасти не найдены</Typography>
-                      <Button sx={{ mt: 2 }} variant="contained" onClick={() => setIsQuickReceiveDialogOpen(true)}>
+                      <Button sx={{ mt: 2 }} variant="contained" onClick={() => openQuickReceiveDialog({ name: partsSearchTerm.trim() })}>
                         Быстрое оприходование
                       </Button>
                     </Box>
@@ -5580,1358 +5332,51 @@ const Orders: React.FC = () => {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={isQuickReceiveDialogOpen} onClose={() => setIsQuickReceiveDialogOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>Быстрое оприходование</DialogTitle>
-        <DialogContent>
-          <Box sx={{ mt: 2 }}>
-            <Card sx={{ p: 2, bgcolor: 'grey.50', border: '1px solid', borderColor: 'divider' }}>
-              <Typography variant="subtitle1" fontWeight="bold" sx={{ mb: 2 }}>
-                Новая поставка на склад
-              </Typography>
-              <Grid container spacing={2}>
-                <Grid item xs={12} md={6}>
-                  <Autocomplete
-                    freeSolo
-                    options={quickPartNameOptions}
-                    value={quickPartName}
-                    onChange={(_, newValue) => {
-                      const nextName = newValue || '';
-                      setQuickPartName(nextName);
-                      const matchedPart = inventoryParts.find((part) => normalizePartField(part.name) === normalizePartField(nextName));
-                      if (matchedPart) {
-                        setQuickPartCategory(matchedPart.category || 'Прочее');
-                        setQuickPartBrand(matchedPart.brand || '');
-                        setQuickPartModel(matchedPart.model || '');
-                        setQuickPartWholesalePrice(String((matchedPart.wholesalePrice ?? matchedPart.unitPrice) || ''));
-                      }
-                    }}
-                    onInputChange={(_, newInputValue) => {
-                      setQuickPartName(newInputValue);
-                      const matchedPart = inventoryParts.find((part) => normalizePartField(part.name) === normalizePartField(newInputValue));
-                      if (matchedPart) {
-                        setQuickPartCategory(matchedPart.category || 'Прочее');
-                        setQuickPartBrand(matchedPart.brand || '');
-                        setQuickPartModel(matchedPart.model || '');
-                        setQuickPartWholesalePrice(String((matchedPart.wholesalePrice ?? matchedPart.unitPrice) || ''));
-                      }
-                    }}
-                    renderInput={(params) => <TextField {...params} fullWidth label="Название запчасти" />}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <Autocomplete
-                    freeSolo
-                    options={quickPartCategoryOptions}
-                    value={quickPartCategory}
-                    onChange={(_, newValue) => setQuickPartCategory(newValue || '')}
-                    onInputChange={(_, newInputValue) => setQuickPartCategory(newInputValue)}
-                    renderInput={(params) => <TextField {...params} fullWidth label="Категория" />}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <Autocomplete
-                    freeSolo
-                    options={quickPartBrandOptions}
-                    value={quickPartBrand}
-                    onChange={(_, newValue) => {
-                      setQuickPartBrand(newValue || '');
-                      if (quickPartName.trim()) {
-                        const matchedPart = inventoryParts.find(
-                          (part) =>
-                            normalizePartField(part.name) === normalizePartField(quickPartName) &&
-                            normalizePartField(part.brand) === normalizePartField(newValue || ''),
-                        );
-                        if (matchedPart) {
-                          setQuickPartCategory(matchedPart.category || 'Прочее');
-                          setQuickPartModel(matchedPart.model || '');
-                          setQuickPartWholesalePrice(String((matchedPart.wholesalePrice ?? matchedPart.unitPrice) || ''));
-                        }
-                      }
-                    }}
-                    onInputChange={(_, newInputValue) => setQuickPartBrand(newInputValue)}
-                    renderInput={(params) => <TextField {...params} fullWidth label="Бренд" />}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <Autocomplete
-                    freeSolo
-                    options={quickPartModelOptions}
-                    value={quickPartModel}
-                    onChange={(_, newValue) => setQuickPartModel(newValue || '')}
-                    onInputChange={(_, newInputValue) => setQuickPartModel(newInputValue)}
-                    renderInput={(params) => <TextField {...params} fullWidth label="Модель" />}
-                  />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField fullWidth label="Оптовая цена, ₽" type="number" value={quickPartWholesalePrice} onChange={(e) => setQuickPartWholesalePrice(e.target.value)} />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField fullWidth label="Количество, шт." type="number" inputProps={{ min: 1 }} value={quickPartQuantity} onChange={(e) => setQuickPartQuantity(Number(e.target.value) || 1)} />
-                </Grid>
-                <Grid item xs={12}>
-                  {quickPartExactMatch && (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                      Будет пополнена существующая позиция: <strong>{quickPartExactMatch.name}</strong>
-                      {' '}• остаток сейчас {quickPartExactMatch.quantity} шт.
-                    </Typography>
-                  )}
-                  <Button
-                    variant="contained"
-                    fullWidth
-                    onClick={handleQuickReceivePart}
-                    disabled={!quickPartName.trim() || Number(quickPartWholesalePrice) <= 0 || quickPartQuantity <= 0}
-                  >
-                    Оприходовать и выбрать
-                  </Button>
-                </Grid>
-              </Grid>
-            </Card>
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsQuickReceiveDialogOpen(false)}>Отмена</Button>
-        </DialogActions>
-      </Dialog>
+      <QuickReceivePartDialog
+        open={isQuickReceiveDialogOpen}
+        inventoryParts={inventoryParts}
+        initialValues={quickReceiveInitial}
+        onClose={() => setIsQuickReceiveDialogOpen(false)}
+        onSubmit={(values) => void handleQuickReceivePart(values)}
+      />
 
-      {/* Delivery Order Dialog */}
-      <Dialog open={isDeliveryDialogOpen} onClose={() => setIsDeliveryDialogOpen(false)} maxWidth="lg" fullWidth>
-        <DialogTitle>Выдача заказа клиенту</DialogTitle>
-        <DialogContent>
-          {selectedOrder && (
-            <Box sx={{ mt: 2 }}>
-              <Grid container spacing={3}>
-                {/* Информация о заказе */}
-                <Grid item xs={12}>
-                  <Card sx={{ mb: 3 }}>
-                    <CardContent>
-                      <Typography variant="h6" gutterBottom color="primary">
-                        Заказ {selectedOrder.orderNumber}
-                      </Typography>
-                      <Grid container spacing={2}>
-                        <Grid item xs={12} md={6}>
-                          <Typography variant="body2">
-                            Клиент: <strong>{selectedOrder.clientName}</strong>
-                          </Typography>
-                          <Typography variant="body2">
-                            Телефон: <strong>{formatPhone(selectedOrder.clientPhone)}</strong>
-                          </Typography>
-                        </Grid>
-                        <Grid item xs={12} md={6}>
-                          <Typography variant="body2">
-                            Устройство: <strong>{selectedOrder.deviceBrand} {selectedOrder.deviceModel}</strong>
-                          </Typography>
-                            <Typography variant="body2">
-                              Стоимость: <strong>{getOrderTotal(selectedOrder).toLocaleString('ru-RU')} ₽</strong>
-                            </Typography>
-                        </Grid>
-                      </Grid>
-                    </CardContent>
-                  </Card>
-                </Grid>
+      <QuickWorkDialog
+        open={isQuickWorkDialogOpen}
+        paymentMethods={crmSettings.payment.paymentMethodOptions}
+        onClose={() => setIsQuickWorkDialogOpen(false)}
+        onSubmit={(values) => void handleCreateQuickWork(values)}
+      />
 
-                {/* Список работ и запчастей */}
-                <Grid item xs={12}>
-                  <Typography variant="h6" gutterBottom>Выполненные работы</Typography>
-                  <Card>
-                    <CardContent>
-                      {selectedOrder.parts && selectedOrder.parts.length > 0 ? (
-                        <Box>
-                          {selectedOrder.parts.map((part, index) => (
-                            <Box key={part.id} sx={{ 
-                              display: 'flex', 
-                              justifyContent: 'space-between', 
-                              alignItems: 'center',
-                              py: 1,
-                              borderBottom: index < selectedOrder.parts!.length - 1 ? '1px solid #e0e0e0' : 'none'
-                            }}>
-                              <Box>
-                                <Typography variant="body1">
-                                  {part.partId === 'screen_protection' ? 'Защита экрана' :
-                                   part.partId === 'cleaning' ? 'Чистка устройства' :
-                                   (part as any).workType === 'work_with_part' ? `${(part as any).workName}` :
-                                   (part as any).workType === 'work_only' ? `${(part as any).workName}` :
-                                   `Работа #${index + 1}`}
-                                </Typography>
-                                <Typography variant="body2" color="text.secondary">
-                                  Количество: {part.quantity} • Цена работы: {part.unitPrice.toLocaleString('ru-RU')} ₽
-                                  {(part as any).partInfo && (
-                                    <span>
-                                      <br />
-                                      <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
-                                        Запчасть: {(part as any).partInfo.name} 
-                                        {userRole === 'employee' ? (
-                                          <span style={{ color: '#FF6B35', fontWeight: 'bold' }}>
-                                            {' '}({(part as any).partInfo.price?.toLocaleString('ru-RU')} ₽)
-                                          </span>
-                                        ) : (
-                                          <span style={{ color: '#9E9E9E', fontWeight: 'bold' }}>
-                                            {' '}(включено в стоимость работы)
-                                          </span>
-                                        )}
-                                      </Typography>
-                                    </span>
-                                  )}
-                                </Typography>
-                              </Box>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                                <Typography variant="h6" color="primary">
-                                  {part.totalPrice.toLocaleString('ru-RU')} ₽
-                                </Typography>
-                                <IconButton
-                                  size="small"
-                                  onClick={() => handleRemovePart(part.id)}
-                                  sx={{ color: 'error.main' }}
-                                >
-                                  <Delete />
-                                </IconButton>
-                              </Box>
-                            </Box>
-                          ))}
-                          <Box sx={{ mt: 2, pt: 2, borderTop: '2px solid #FF6B35' }}>
-                            <Typography variant="h6" textAlign="right">
-                              Итого: {selectedOrder.parts.reduce((sum, part) => sum + part.totalPrice, 0).toLocaleString('ru-RU')} ₽
-                            </Typography>
-                          </Box>
-                        </Box>
-                      ) : (
-                        <Typography variant="body2" color="text.secondary">
-                          Работы и запчасти еще не добавлены
-                        </Typography>
-                      )}
-                      
-                      <Button
-                        variant="outlined"
-                        startIcon={<Build />}
-                        onClick={() => {
-                          console.log('Клик по кнопке добавления работы, selectedOrder:', selectedOrder);
-                          if (selectedOrder) {
-                            setIsDeliveryDialogOpen(false);
-                            handleAddWork(selectedOrder);
-                          } else {
-                            toast.error('Заказ не выбран. Попробуйте еще раз.');
-                          }
-                        }}
-                        sx={{ mt: 2 }}
-                      >
-                        Добавить работу
-                      </Button>
-                    </CardContent>
-                  </Card>
-                </Grid>
+      <OrderDeliveryDialog
+        open={isDeliveryDialogOpen}
+        order={selectedOrder}
+        onClose={() => setIsDeliveryDialogOpen(false)}
+        onRemovePart={(partId) => void handleRemovePart(partId)}
+        onAddWork={(order) => void handleAddWork(order)}
+        onComplete={(payload) => void handleCompleteDelivery(payload)}
+      />
 
-                {/* Чек-лист тестирования */}
-                <Grid item xs={12}>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                    <Typography variant="h6">Чек-лист тестирования</Typography>
-                    <Button
-                      variant="contained"
-                      color="success"
-                      startIcon={<CheckCircle />}
-                      onClick={handleCheckAllTests}
-                      sx={{
-                        background: 'linear-gradient(45deg, #4CAF50 30%, #66BB6A 90%)',
-                        boxShadow: '0 3px 5px 2px rgba(76, 175, 80, .3)',
-                        '&:hover': {
-                          background: 'linear-gradient(45deg, #388E3C 30%, #4CAF50 90%)',
-                        }
-                      }}
-                    >
-                      Проверил все
-                    </Button>
-                  </Box>
-                  <Card>
-                    <CardContent>
-                      <Grid container spacing={2}>
-                        {[
-                          { key: 'screenWorks', label: 'Экран работает корректно' },
-                          { key: 'touchWorks', label: 'Сенсорный экран реагирует' },
-                          { key: 'cameraWorks', label: 'Камера работает' },
-                          { key: 'soundWorks', label: 'Звук работает' },
-                          { key: 'chargingWorks', label: 'Зарядка работает' },
-                          { key: 'wifiWorks', label: 'Wi-Fi работает' },
-                          { key: 'bluetoothWorks', label: 'Bluetooth работает' },
-                          { key: 'buttonsWork', label: 'Кнопки работают' },
-                          { key: 'fingerprintWorks', label: 'Отпечаток пальца работает' },
-                          { key: 'faceIdWorks', label: 'Face ID работает' }
-                        ].map((test) => (
-                          <Grid item xs={12} md={6} key={test.key}>
-                            <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                              <input
-                                type="checkbox"
-                                checked={testingChecklist[test.key as keyof typeof testingChecklist]}
-                                onChange={(e) => handleTestingChecklistChange(test.key, e.target.checked)}
-                                style={{ marginRight: 8 }}
-                              />
-                              <Typography variant="body2">{test.label}</Typography>
-                            </Box>
-                          </Grid>
-                        ))}
-                      </Grid>
-                    </CardContent>
-                  </Card>
-                </Grid>
+      {isStepByStepOrderOpen && (
+        <React.Suspense fallback={null}>
+          <OrderCreationWizard
+            open={isStepByStepOrderOpen}
+            onClose={() => setIsStepByStepOrderOpen(false)}
+            onSubmit={handleCreateOrderFromWizard}
+            settings={crmSettings}
+            onSettingsUpdated={setCrmSettings}
+            clients={orderClients}
+            assigneeOptions={assigneeOptions}
+            protectionParts={protectionParts}
+            defaultIntakeManagerName={user?.name || managerOptions[0]?.name || assigneeOptions[0]?.name || ''}
+          />
+        </React.Suspense>
+      )}
 
-                {/* Дополнительные услуги */}
-                <Grid item xs={12}>
-                  <Typography variant="h6" gutterBottom>Дополнительные услуги</Typography>
-                  <Card>
-                    <CardContent>
-                      <Grid container spacing={3}>
-                        <Grid item xs={12} md={6}>
-                          <Button
-                            variant={screenProtection ? "contained" : "outlined"}
-                            fullWidth
-                            startIcon={<Security />}
-                            onClick={() => setScreenProtection(!screenProtection)}
-                            sx={{
-                              height: 60,
-                              fontSize: '1.1rem',
-                              fontWeight: 'bold',
-                              background: screenProtection 
-                                ? 'linear-gradient(45deg, #FF6B35 30%, #FF8A65 90%)'
-                                : 'transparent',
-                              borderColor: '#FF6B35',
-                              color: screenProtection ? 'white' : '#FF6B35',
-                              boxShadow: screenProtection 
-                                ? '0 3px 5px 2px rgba(255, 107, 53, .3)'
-                                : 'none',
-                              '&:hover': {
-                                background: screenProtection 
-                                  ? 'linear-gradient(45deg, #E64A19 30%, #FF6B35 90%)'
-                                  : 'rgba(255, 107, 53, 0.1)',
-                                borderColor: '#E64A19',
-                              }
-                            }}
-                          >
-                            Защита экрана
-                            <Typography variant="body2" sx={{ ml: 1, opacity: 0.8 }}>
-                              +2000 ₽
-                            </Typography>
-                          </Button>
-                        </Grid>
-                        <Grid item xs={12} md={6}>
-                          <Button
-                            variant={cleaning ? "contained" : "outlined"}
-                            fullWidth
-                            startIcon={<CleaningServices />}
-                            onClick={() => setCleaning(!cleaning)}
-                            sx={{
-                              height: 60,
-                              fontSize: '1.1rem',
-                              fontWeight: 'bold',
-                              background: cleaning 
-                                ? 'linear-gradient(45deg, #2196F3 30%, #42A5F5 90%)'
-                                : 'transparent',
-                              borderColor: '#2196F3',
-                              color: cleaning ? 'white' : '#2196F3',
-                              boxShadow: cleaning 
-                                ? '0 3px 5px 2px rgba(33, 150, 243, .3)'
-                                : 'none',
-                              '&:hover': {
-                                background: cleaning 
-                                  ? 'linear-gradient(45deg, #1976D2 30%, #2196F3 90%)'
-                                  : 'rgba(33, 150, 243, 0.1)',
-                                borderColor: '#1976D2',
-                              }
-                            }}
-                          >
-                            Чистка устройства
-                            <Typography variant="body2" sx={{ ml: 1, opacity: 0.8 }}>
-                              +1000 ₽
-                            </Typography>
-                          </Button>
-                        </Grid>
-                      </Grid>
-                    </CardContent>
-                  </Card>
-                </Grid>
-
-                {/* Оплата */}
-                <Grid item xs={12}>
-                  <Typography variant="h6" gutterBottom>Оплата</Typography>
-                  <Card>
-                    <CardContent>
-                      <Grid container spacing={2}>
-                        <Grid item xs={12} md={6}>
-                          <FormControl fullWidth>
-                            <InputLabel>Способ оплаты</InputLabel>
-                            <Select
-                              value={paymentMethod}
-                              onChange={(e) => setPaymentMethod(e.target.value as any)}
-                            >
-                              <MenuItem value="cash">Наличные</MenuItem>
-                              <MenuItem value="card">Банковская карта</MenuItem>
-                              <MenuItem value="online">Онлайн перевод</MenuItem>
-                            </Select>
-                          </FormControl>
-                        </Grid>
-                        <Grid item xs={12} md={6}>
-                          <TextField
-                            fullWidth
-                            label="Сумма к оплате"
-                            type="number"
-                            value={paymentAmount + (screenProtection ? 2000 : 0) + (cleaning ? 1000 : 0)}
-                            onChange={(e) => setPaymentAmount(Number(e.target.value))}
-                            InputProps={{
-                              startAdornment: <InputAdornment position="start">₽</InputAdornment>,
-                            }}
-                          />
-                        </Grid>
-                      </Grid>
-                    </CardContent>
-                  </Card>
-                </Grid>
-              </Grid>
-            </Box>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsDeliveryDialogOpen(false)}>
-            Отмена
-          </Button>
-          <Button 
-            variant="contained" 
-            onClick={handleCompleteDelivery}
-            disabled={!Object.values(testingChecklist).every(test => test)}
-            startIcon={<LocalShipping />}
-          >
-            Выдать заказ клиенту
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Step-by-step order creation dialog */}
-      <Dialog open={isStepByStepOrderOpen} onClose={() => setIsStepByStepOrderOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle component="div">
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Typography variant="h6">Создание заказа · шаг {currentStep + 1} из 4</Typography>
-            <Box sx={{ display: 'flex', gap: 1 }}>
-              {[0, 1, 2, 3].map((step) => (
-                <Box
-                  key={step}
-                  sx={{
-                    width: 12,
-                    height: 12,
-                    borderRadius: '50%',
-                    backgroundColor: step <= currentStep ? '#FF6B35' : '#e0e0e0',
-                    transition: 'all 0.3s ease'
-                  }}
-                />
-              ))}
-            </Box>
-          </Box>
-        </DialogTitle>
-        <DialogContent>
-          <Box sx={{ mt: 2 }}>
-            {/* Step 1: client */}
-            {currentStep === 0 && (
-              <Box>
-                <Typography variant="h6" gutterBottom color="primary">
-                  Информация о клиенте
-                </Typography>
-                <Grid container spacing={3}>
-                  <Grid item xs={12}>
-                    <TextField
-                      fullWidth
-                      label="ФИО клиента"
-                      value={newOrderData.clientName}
-                      onChange={(e) => handleStepDataChange('clientName', e.target.value)}
-                      placeholder="Например: Иванов Иван Иванович"
-                      required
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={6}>
-                    <TextField
-                      fullWidth
-                      label="Телефон"
-                      value={newOrderData.clientPhone}
-                      onChange={(e) => handleStepDataChange('clientPhone', e.target.value)}
-                      placeholder="+7 (999) 123-45-67"
-                      required
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={6}>
-                    <TextField
-                      fullWidth
-                      label="Email (необязательно)"
-                      value={newOrderData.clientEmail}
-                      onChange={(e) => handleStepDataChange('clientEmail', e.target.value)}
-                      placeholder="client@example.com"
-                      type="email"
-                    />
-                  </Grid>
-                  <Grid item xs={12}>
-                    <TextField
-                      fullWidth
-                      label="Заметка по клиенту"
-                      value={newOrderData.clientNotes}
-                      onChange={(e) => handleStepDataChange('clientNotes', e.target.value)}
-                      placeholder="Например: предпочитает звонок, забирает вечером, есть особые договоренности"
-                      multiline
-                      rows={2}
-                    />
-                  </Grid>
-                </Grid>
-              </Box>
-            )}
-
-            {/* Step 2: device */}
-            {currentStep === 1 && (
-              <Box>
-                <Typography variant="h6" gutterBottom color="primary">
-                  Информация об устройстве
-                </Typography>
-                <Grid container spacing={3}>
-                  <Grid item xs={12} md={6}>
-                    <FormControl fullWidth>
-                      <InputLabel>Тип устройства</InputLabel>
-                      <Select
-                        value={newOrderData.deviceType}
-                        onChange={(e) => {
-                          handleStepDataChange('deviceType', e.target.value);
-                          handleStepDataChange('deviceModel', '');
-                          handleStepDataChange('deviceBrand', '');
-                        }}
-                      >
-                        <MenuItem value="phone">Телефон</MenuItem>
-                        <MenuItem value="tablet">Планшет</MenuItem>
-                        <MenuItem value="laptop">Ноутбук</MenuItem>
-                        <MenuItem value="desktop">Компьютер</MenuItem>
-                        <MenuItem value="other">Другое</MenuItem>
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                  <Grid item xs={12} md={6}>
-                    <Autocomplete
-                      freeSolo
-                      options={deviceModelOptions}
-                      value={newOrderData.deviceModel}
-                      onChange={(event, newValue) => {
-                        handleStepDataChange('deviceModel', newValue || '');
-                        rememberDeviceModel(newOrderData.deviceType, newValue || '');
-                      }}
-                      onInputChange={(event, newInputValue) => {
-                        handleStepDataChange('deviceModel', newInputValue);
-                      }}
-                      renderInput={(params) => (
-                        <TextField
-                          {...params}
-                          label="Модель"
-                          placeholder="Например: Honor 10i, Apple MacBook Air"
-                          required
-                        />
-                      )}
-                      renderOption={(props, option) => {
-                        const { key, ...optionProps } = props;
-                        return (
-                          <Box component="li" key={`${option}-${key}`} {...optionProps}>
-                            <Typography variant="body1">{option}</Typography>
-                          </Box>
-                        );
-                      }}
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={6}>
-                    <TextField
-                      fullWidth
-                      label="Цвет"
-                      value={newOrderData.deviceColor}
-                      onChange={(e) => handleStepDataChange('deviceColor', e.target.value)}
-                      placeholder="Черный, белый, синий..."
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={6}>
-                    <TextField
-                      fullWidth
-                      label="Серийный номер"
-                      value={newOrderData.deviceSerial}
-                      onChange={(e) => handleStepDataChange('deviceSerial', e.target.value)}
-                      placeholder="ABC123456"
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={6}>
-                    <TextField
-                      fullWidth
-                      label="IMEI / идентификатор"
-                      value={newOrderData.deviceImei}
-                      onChange={(e) => handleStepDataChange('deviceImei', e.target.value)}
-                      placeholder="123456789012345"
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={6}>
-                    <TextField
-                      fullWidth
-                      label="Пароль устройства"
-                      value={newOrderData.devicePassword}
-                      onChange={(e) => handleStepDataChange('devicePassword', e.target.value)}
-                      placeholder="PIN / пароль / графический ключ"
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={6}>
-                    <FormControl fullWidth>
-                      <InputLabel>Состояние устройства</InputLabel>
-                      <Select
-                        value={newOrderData.deviceCondition}
-                        onChange={(e) => handleStepDataChange('deviceCondition', e.target.value)}
-                      >
-                        <MenuItem value="excellent">Отличное</MenuItem>
-                        <MenuItem value="good">Хорошее</MenuItem>
-                        <MenuItem value="fair">Удовлетворительное</MenuItem>
-                        <MenuItem value="poor">Плохое</MenuItem>
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                  <Grid item xs={12}>
-                    <TextField
-                      fullWidth
-                      label="Внешние дефекты"
-                      value={newOrderData.deviceExternalCondition}
-                      onChange={(e) => handleStepDataChange('deviceExternalCondition', e.target.value)}
-                      placeholder="Сколы, потертости, трещины..."
-                      multiline
-                      rows={2}
-                    />
-                  </Grid>
-                </Grid>
-              </Box>
-            )}
-
-            {/* Step 3: issue */}
-            {currentStep === 2 && (
-              <Box>
-                <Typography variant="h6" gutterBottom color="primary">
-                  Описание проблемы
-                </Typography>
-                <Grid container spacing={3}>
-                  <Grid item xs={12}>
-                    <Autocomplete
-                      freeSolo
-                      options={commonDiagnoses}
-                      value={newOrderData.diagnosis}
-                      onChange={(event, newValue) => {
-                        handleStepDataChange('diagnosis', newValue || '');
-                      }}
-                      onInputChange={(event, newInputValue) => {
-                        handleStepDataChange('diagnosis', newInputValue);
-                      }}
-                      renderInput={(params) => (
-                        <TextField
-                          {...params}
-                          label="Предварительный диагноз"
-                          placeholder="Выберите из списка или введите свой диагноз"
-                          required
-                        />
-                      )}
-                      renderOption={(props, option) => {
-                        const { key, ...optionProps } = props;
-                        return (
-                          <Box component="li" key={`${option}-${key}`} {...optionProps}>
-                            <Typography variant="body1">{option}</Typography>
-                          </Box>
-                        );
-                      }}
-                    />
-                  </Grid>
-                  <Grid item xs={12}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                      <Typography variant="body1" fontWeight="bold">
-                        Комментарий для сотрудников
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        (видно только сотрудникам)
-                      </Typography>
-                    </Box>
-                    <TextField
-                      fullWidth
-                      label="Внутренние заметки"
-                      value={newOrderData.staffComments}
-                      onChange={(e) => handleStepDataChange('staffComments', e.target.value)}
-                      placeholder="Детали для мастера и менеджеров: симптомы, договоренности, особые условия..."
-                      multiline
-                      rows={3}
-                    />
-                  </Grid>
-                  <Grid item xs={12}>
-                    <FormControl fullWidth>
-                      <InputLabel>Приоритет заказа</InputLabel>
-                      <Select
-                        value={newOrderData.priority}
-                        onChange={(e) => handleStepDataChange('priority', e.target.value)}
-                      >
-                        <MenuItem value="low">Низкий</MenuItem>
-                        <MenuItem value="medium">Средний</MenuItem>
-                        <MenuItem value="high">Высокий</MenuItem>
-                        <MenuItem value="urgent">Срочный</MenuItem>
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                </Grid>
-              </Box>
-            )}
-
-            {/* Step 4: price and schedule */}
-            {currentStep === 3 && (
-              <Box>
-                <Typography variant="h6" gutterBottom color="primary">
-                  Стоимость и сроки
-                </Typography>
-                <Grid container spacing={3}>
-                  <Grid item xs={12} md={4}>
-                    <TextField
-                      fullWidth
-                      label="Ориентировочная стоимость"
-                      type="number"
-                      value={newOrderData.estimatedCost}
-                      onChange={(e) => handleStepDataChange('estimatedCost', Number(e.target.value))}
-                      InputProps={{
-                        startAdornment: <InputAdornment position="start">₽</InputAdornment>,
-                      }}
-                      helperText="Предварительная стоимость ремонта"
-                      required
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={4}>
-                    <TextField
-                      fullWidth
-                      label="Аванс клиента"
-                      type="number"
-                      value={newOrderData.advancePayment}
-                      onChange={(e) => handleStepDataChange('advancePayment', Math.max(0, Number(e.target.value) || 0))}
-                      InputProps={{
-                        startAdornment: <InputAdornment position="start">₽</InputAdornment>,
-                      }}
-                      helperText="Будет указан в акте приема"
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={4}>
-                    <TextField
-                      fullWidth
-                      label="Срок выполнения, дней"
-                      type="number"
-                      value={newOrderData.estimatedDays}
-                      onChange={(e) => handleStepDataChange('estimatedDays', Number(e.target.value))}
-                      inputProps={{ min: 1, max: 30 }}
-                      required
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={4}>
-                    <FormControl fullWidth>
-                      <InputLabel>Исполнитель</InputLabel>
-                      <Select
-                        value={newOrderData.technicianId}
-                        label="Исполнитель"
-                        onChange={(e) => {
-                          const technician = assigneeOptions.find((option) => option.id === e.target.value);
-                          handleStepDataChange('technicianId', e.target.value);
-                          handleStepDataChange('technicianName', technician?.name || '');
-                        }}
-                      >
-                        {assigneeOptions.map((option) => (
-                          <MenuItem key={option.id} value={option.id}>
-                            {option.name}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                  <Grid item xs={12} md={4}>
-                    <FormControl fullWidth>
-                      <InputLabel>Менеджер приема</InputLabel>
-                      <Select
-                        value={newOrderData.intakeManagerName}
-                        label="Менеджер приема"
-                        onChange={(e) => handleStepDataChange('intakeManagerName', e.target.value)}
-                      >
-                        {assigneeOptions.map((option) => (
-                          <MenuItem key={option.id} value={option.name}>
-                            {option.name}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                  <Grid item xs={12} md={4}>
-                    <FormControl fullWidth>
-                      <InputLabel>Менеджер выдачи</InputLabel>
-                      <Select
-                        value={newOrderData.deliveryManagerName}
-                        label="Менеджер выдачи"
-                        onChange={(e) => handleStepDataChange('deliveryManagerName', e.target.value)}
-                      >
-                        {assigneeOptions.map((option) => (
-                          <MenuItem key={option.id} value={option.name}>
-                            {option.name}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                   
-                  {/* Extra services */}
-                  <Grid item xs={12}>
-                    <Typography variant="h6" gutterBottom color="primary">
-                      Дополнительные услуги
-                    </Typography>
-                    <Card sx={{ p: 2 }}>
-                      <Grid container spacing={2}>
-                        <Grid item xs={12} md={6}>
-                          <Button
-                            variant={newOrderData.offerProtection ? "contained" : "outlined"}
-                            fullWidth
-                            startIcon={<Security />}
-                            onClick={() => handleStepDataChange('offerProtection', !newOrderData.offerProtection)}
-                            sx={{
-                              height: 60,
-                              fontSize: '1rem',
-                              fontWeight: 'bold',
-                              background: newOrderData.offerProtection 
-                                ? 'linear-gradient(45deg, #FF6B35 30%, #FF8A65 90%)'
-                                : 'transparent',
-                              borderColor: '#FF6B35',
-                              color: newOrderData.offerProtection ? 'white' : '#FF6B35',
-                              boxShadow: newOrderData.offerProtection 
-                                ? '0 3px 5px 2px rgba(255, 107, 53, .3)'
-                                : 'none',
-                              '&:hover': {
-                                background: newOrderData.offerProtection 
-                                  ? 'linear-gradient(45deg, #E64A19 30%, #FF6B35 90%)'
-                                  : 'rgba(255, 107, 53, 0.1)',
-                                borderColor: '#E64A19',
-                              }
-                            }}
-                          >
-                            Предложить защиту экрана
-                          </Button>
-                          {newOrderData.offerProtection && (
-                            <Box sx={{ mt: 1.5, display: 'grid', gap: 1 }}>
-                              <FormControl size="small" fullWidth>
-                                <InputLabel>Пленка / стекло со склада</InputLabel>
-                                <Select
-                                  label="Пленка / стекло со склада"
-                                  value={protectionPartId}
-                                  onChange={(e) => setProtectionPartId(e.target.value)}
-                                >
-                                  <MenuItem value="">Выберите позицию</MenuItem>
-                                  {protectionParts.map((part) => (
-                                    <MenuItem key={part.id} value={part.id}>
-                                      {part.name} • {Number(part.unitPrice || 0).toLocaleString('ru-RU')} ₽ • остаток {part.quantity}
-                                    </MenuItem>
-                                  ))}
-                                </Select>
-                              </FormControl>
-                              <TextField
-                                size="small"
-                                fullWidth
-                                type="number"
-                                label="Цена поклейки"
-                                value={protectionInstallPrice}
-                                onChange={(e) => setProtectionInstallPrice(Number(e.target.value) || 0)}
-                                InputProps={{
-                                  startAdornment: <InputAdornment position="start">₽</InputAdornment>,
-                                }}
-                              />
-                            </Box>
-                          )}
-                        </Grid>
-                        <Grid item xs={12} md={6}>
-                          <Button
-                            variant={newOrderData.offerCleaning ? "contained" : "outlined"}
-                            fullWidth
-                            startIcon={<CleaningServices />}
-                            onClick={() => handleStepDataChange('offerCleaning', !newOrderData.offerCleaning)}
-                            sx={{
-                              height: 60,
-                              fontSize: '1rem',
-                              fontWeight: 'bold',
-                              background: newOrderData.offerCleaning 
-                                ? 'linear-gradient(45deg, #2196F3 30%, #42A5F5 90%)'
-                                : 'transparent',
-                              borderColor: '#2196F3',
-                              color: newOrderData.offerCleaning ? 'white' : '#2196F3',
-                              boxShadow: newOrderData.offerCleaning 
-                                ? '0 3px 5px 2px rgba(33, 150, 243, .3)'
-                                : 'none',
-                              '&:hover': {
-                                background: newOrderData.offerCleaning 
-                                  ? 'linear-gradient(45deg, #1976D2 30%, #2196F3 90%)'
-                                  : 'rgba(33, 150, 243, 0.1)',
-                                borderColor: '#1976D2',
-                              }
-                            }}
-                          >
-                            Предложить чистку устройства
-                          </Button>
-                          {newOrderData.offerCleaning && (
-                            <TextField
-                              sx={{ mt: 1.5 }}
-                              size="small"
-                              fullWidth
-                              type="number"
-                              label="Цена чистки"
-                              value={cleaningServicePrice}
-                              onChange={(e) => setCleaningServicePrice(Number(e.target.value) || 0)}
-                              InputProps={{
-                                startAdornment: <InputAdornment position="start">₽</InputAdornment>,
-                              }}
-                            />
-                          )}
-                        </Grid>
-                      </Grid>
-                    </Card>
-                  </Grid>
-                  
-                  <Grid item xs={12}>
-                    <Card sx={{ p: 2, bgcolor: 'grey.50' }}>
-                      <Typography variant="h6" gutterBottom>
-                        Сводка заказа
-                      </Typography>
-                      <Typography variant="body2">
-                        <strong>Клиент:</strong> {newOrderData.clientName}
-                      </Typography>
-                      <Typography variant="body2">
-                        <strong>Телефон:</strong> {newOrderData.clientPhone}
-                      </Typography>
-                      <Typography variant="body2">
-                        <strong>Устройство:</strong> {newOrderData.deviceBrand} {newOrderData.deviceModel}
-                      </Typography>
-                      <Typography variant="body2">
-                        <strong>Диагноз:</strong> {newOrderData.diagnosis}
-                      </Typography>
-                      <Typography variant="body2">
-                        <strong>Стоимость:</strong> {newOrderData.estimatedCost} ₽
-                      </Typography>
-                      <Typography variant="body2">
-                        <strong>Аванс:</strong> {Number(newOrderData.advancePayment || 0).toLocaleString('ru-RU')} ₽
-                      </Typography>
-                      <Typography variant="body2">
-                        <strong>Срок:</strong> {newOrderData.estimatedDays} дн.
-                      </Typography>
-                      <Typography variant="body2">
-                        <strong>Исполнитель:</strong> {newOrderData.technicianName || 'Не назначен'}
-                      </Typography>
-                      <Typography variant="body2">
-                        <strong>Принял менеджер:</strong> {newOrderData.intakeManagerName || 'Не назначен'}
-                      </Typography>
-                      <Typography variant="body2">
-                        <strong>Выдает менеджер:</strong> {newOrderData.deliveryManagerName || 'Не назначен'}
-                      </Typography>
-                      {newOrderData.offerProtection && selectedProtectionPart && (
-                        <Typography variant="body2" color="primary">
-                          <strong>+ Защита экрана:</strong> {(Number(selectedProtectionPart.unitPrice || 0) + Number(protectionInstallPrice || 0)).toLocaleString('ru-RU')} ₽
-                        </Typography>
-                      )}
-                      {newOrderData.offerCleaning && (
-                        <Typography variant="body2" color="primary">
-                          <strong>+ Чистка устройства:</strong> {Number(cleaningServicePrice || 0).toLocaleString('ru-RU')} ₽
-                        </Typography>
-                      )}
-                      <Typography variant="h6" sx={{ mt: 1, color: 'primary.main' }}>
-                        <strong>
-                          Итого: {(
-                            Number(newOrderData.estimatedCost || 0) +
-                            (newOrderData.offerProtection && selectedProtectionPart
-                              ? Number(selectedProtectionPart.unitPrice || 0) + Number(protectionInstallPrice || 0)
-                              : 0) +
-                            (newOrderData.offerCleaning ? Number(cleaningServicePrice || 0) : 0)
-                          ).toLocaleString('ru-RU')} ₽
-                        </strong>
-                      </Typography>
-                    </Card>
-                  </Grid>
-                </Grid>
-              </Box>
-            )}
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsStepByStepOrderOpen(false)}>
-            Отмена
-          </Button>
-          {currentStep > 0 && (
-            <Button onClick={handlePrevStep}>
-              Назад
-            </Button>
-          )}
-          {currentStep < 3 ? (
-            <Button 
-              variant="contained" 
-              onClick={handleNextStep}
-              disabled={
-                (currentStep === 0 && (!newOrderData.clientName || !newOrderData.clientPhone)) ||
-                (currentStep === 1 && !newOrderData.deviceModel) ||
-                (currentStep === 2 && !newOrderData.diagnosis)
-              }
-            >
-              Далее
-            </Button>
-          ) : (
-              <Button 
-                variant="contained" 
-                onClick={handleCreateOrderFromSteps}
-                disabled={!newOrderData.estimatedDays || newOrderData.estimatedDays < 1}
-                sx={{
-                  background: 'linear-gradient(45deg, #4CAF50 30%, #66BB6A 90%)',
-                  boxShadow: '0 3px 5px 2px rgba(76, 175, 80, .3)',
-                '&:hover': {
-                  background: 'linear-gradient(45deg, #388E3C 30%, #4CAF50 90%)',
-                }
-              }}
-            >
-              Новый заказ
-            </Button>
-          )}
-        </DialogActions>
-      </Dialog>
-
-      <Dialog
+      <OrderPriceListDialog
         open={isPriceDialogOpen}
-        onClose={closePriceListDialog}
-        maxWidth="xl"
-        fullWidth
-      >
-        <DialogTitle sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 2 }}>
-          <Box>
-            Прайс работ
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-              Цены указаны по модели устройства с учетом запчасти и работы. Ориентир: Екатеринбург.
-            </Typography>
-          </Box>
-          {canEditPriceList && (
-            <Button
-              variant={isPriceEditMode ? 'contained' : 'outlined'}
-              startIcon={<Edit />}
-              onClick={() => setIsPriceEditMode((value) => !value)}
-              sx={{ mt: 0.25, whiteSpace: 'nowrap' }}
-            >
-              {isPriceEditMode ? 'Завершить редактирование' : 'Редактировать'}
-            </Button>
-          )}
-        </DialogTitle>
-        <DialogContent dividers>
-          <Box sx={{ display: 'flex', gap: 1, mb: 1.5 }}>
-            <TextField
-              fullWidth
-              label="Поиск"
-              value={priceSearch}
-              onChange={(event) => setPriceSearch(event.target.value)}
-              placeholder="Модель, работа или запчасть"
-            />
-            <Button
-              variant="outlined"
-              startIcon={<FilterList />}
-              onClick={() => setIsPriceFilterOpen((value) => !value)}
-              sx={{ minWidth: 140 }}
-            >
-              Фильтр
-            </Button>
-          </Box>
-
-          {isPriceFilterOpen && (
-            <Grid container spacing={1.5} sx={{ mb: 2 }}>
-              <Grid item xs={12} md={4}>
-                <FormControl fullWidth>
-                  <InputLabel>Тип устройства</InputLabel>
-                  <Select
-                    value={priceDeviceType}
-                    label="Тип устройства"
-                    onChange={(event) => {
-                      setPriceDeviceType(event.target.value);
-                      setPriceBrand('all');
-                      setPriceModel('all');
-                    }}
-                  >
-                    <MenuItem value="all">Все</MenuItem>
-                    {deviceTypes.map((type) => (
-                      <MenuItem key={type} value={type}>
-                        {deviceTypeLabels[type] || type}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-              <Grid item xs={12} md={4}>
-                <FormControl fullWidth>
-                  <InputLabel>Бренд</InputLabel>
-                  <Select
-                    value={priceBrand}
-                    label="Бренд"
-                    onChange={(event) => {
-                      setPriceBrand(event.target.value);
-                      setPriceModel('all');
-                    }}
-                  >
-                    <MenuItem value="all">Все бренды</MenuItem>
-                    {priceBrandOptions.map((brand) => (
-                      <MenuItem key={brand} value={brand}>
-                        {brand}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-              <Grid item xs={12} md={4}>
-                <FormControl fullWidth>
-                  <InputLabel>Модель</InputLabel>
-                  <Select value={priceModel} label="Модель" onChange={(event) => setPriceModel(event.target.value)}>
-                    <MenuItem value="all">Все модели</MenuItem>
-                    {priceModelOptions.map((model) => (
-                      <MenuItem key={model} value={model}>
-                        {model}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-            </Grid>
-          )}
-
-          {isPriceEditMode && canEditPriceList && (
-            <Box sx={{ mb: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-              <Grid container spacing={1.5} alignItems="center">
-                <Grid item xs={12} md={2}>
-                  <FormControl fullWidth size="small">
-                    <InputLabel>Тип</InputLabel>
-                    <Select
-                      value={newPriceItem.deviceType}
-                      label="Тип"
-                      onChange={(event) => setNewPriceItem((prev) => ({ ...prev, deviceType: event.target.value }))}
-                    >
-                      {deviceTypes.map((type) => (
-                        <MenuItem key={type} value={type}>
-                          {deviceTypeLabels[type] || type}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                </Grid>
-                <Grid item xs={12} md={2}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    label="Модель"
-                    value={newPriceItem.model}
-                    onChange={(event) => setNewPriceItem((prev) => ({ ...prev, model: event.target.value }))}
-                  />
-                </Grid>
-                <Grid item xs={12} md={2}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    label="Работа"
-                    value={newPriceItem.workName}
-                    onChange={(event) => setNewPriceItem((prev) => ({ ...prev, workName: event.target.value }))}
-                  />
-                </Grid>
-                <Grid item xs={12} md={2}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    label="Запчасть"
-                    value={newPriceItem.partName}
-                    onChange={(event) => setNewPriceItem((prev) => ({ ...prev, partName: event.target.value }))}
-                  />
-                </Grid>
-                <Grid item xs={6} md={1.5}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    type="number"
-                    label="Запчасть"
-                    value={newPriceItem.partCost}
-                    onChange={(event) => setNewPriceItem((prev) => ({ ...prev, partCost: Number(event.target.value) || 0 }))}
-                  />
-                </Grid>
-                <Grid item xs={6} md={1.5}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    type="number"
-                    label="Работа"
-                    value={newPriceItem.workCost}
-                    onChange={(event) => setNewPriceItem((prev) => ({ ...prev, workCost: Number(event.target.value) || 0 }))}
-                  />
-                </Grid>
-                <Grid item xs={12} md={1}>
-                  <Button fullWidth variant="contained" onClick={addPriceItem}>
-                    Добавить
-                  </Button>
-                </Grid>
-              </Grid>
-            </Box>
-          )}
-
-          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '260px minmax(0, 1fr)' }, gap: 2 }}>
-            <Box
-              sx={{
-                border: '1px solid',
-                borderColor: 'divider',
-                borderRadius: 2,
-                p: 1,
-                maxHeight: '62vh',
-                overflow: 'auto',
-              }}
-            >
-              <Button
-                fullWidth
-                variant={priceDeviceType === 'all' && priceBrand === 'all' && priceModel === 'all' ? 'contained' : 'text'}
-                onClick={() => {
-                  setPriceDeviceType('all');
-                  setPriceBrand('all');
-                  setPriceModel('all');
-                }}
-                sx={{ justifyContent: 'space-between', mb: 0.75 }}
-              >
-                Все устройства
-                <Chip size="small" label={priceList.length} />
-              </Button>
-              {priceTree.map((typeGroup) => (
-                <Box key={typeGroup.type} sx={{ mb: 0.75 }}>
-                  <Button
-                    fullWidth
-                    variant={priceDeviceType === typeGroup.type && priceBrand === 'all' && priceModel === 'all' ? 'contained' : 'text'}
-                    onClick={() => {
-                      setPriceDeviceType(typeGroup.type);
-                      setPriceBrand('all');
-                      setPriceModel('all');
-                    }}
-                    sx={{ justifyContent: 'space-between', fontWeight: 800 }}
-                  >
-                    {deviceTypeLabels[typeGroup.type] || typeGroup.type}
-                    <Chip size="small" label={typeGroup.total} />
-                  </Button>
-                  {typeGroup.brands.map((brandGroup) => (
-                    <Box key={`${typeGroup.type}_${brandGroup.brand}`} sx={{ pl: 1.25 }}>
-                      <Button
-                        fullWidth
-                        size="small"
-                        variant={priceDeviceType === typeGroup.type && priceBrand === brandGroup.brand && priceModel === 'all' ? 'outlined' : 'text'}
-                        onClick={() => {
-                          setPriceDeviceType(typeGroup.type);
-                          setPriceBrand(brandGroup.brand);
-                          setPriceModel('all');
-                        }}
-                        sx={{ justifyContent: 'space-between', textTransform: 'none' }}
-                      >
-                        {brandGroup.brand}
-                        <Chip size="small" label={brandGroup.total} />
-                      </Button>
-                      {priceDeviceType === typeGroup.type && priceBrand === brandGroup.brand && (
-                        <Box sx={{ pl: 1.25 }}>
-                          {brandGroup.models.map((model) => (
-                            <Button
-                              key={model}
-                              fullWidth
-                              size="small"
-                              variant={priceModel === model ? 'contained' : 'text'}
-                              onClick={() => setPriceModel(model)}
-                              sx={{ justifyContent: 'flex-start', textAlign: 'left', textTransform: 'none' }}
-                            >
-                              {model}
-                            </Button>
-                          ))}
-                        </Box>
-                      )}
-                    </Box>
-                  ))}
-                </Box>
-              ))}
-            </Box>
-
-            <Box sx={{ maxHeight: '62vh', overflow: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-              <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse', minWidth: isPriceEditMode ? 1050 : 900 }}>
-              <Box component="thead" sx={{ bgcolor: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
-                <Box component="tr">
-                  {['Тип', 'Модель', 'Работа', 'Запчасть', 'Цена запчасти', 'Цена работы', 'Итого', isPriceEditMode ? '' : null].filter(Boolean).map((header) => (
-                    <Box
-                      key={header}
-                      component="th"
-                      sx={{ p: 1.25, textAlign: 'left', borderBottom: '1px solid', borderColor: 'divider', fontSize: 13 }}
-                    >
-                      {header}
-                    </Box>
-                  ))}
-                </Box>
-              </Box>
-              <Box component="tbody">
-                {filteredPriceList.map((item) => {
-                  const total = Number(item.partCost || 0) + Number(item.workCost || 0);
-                  return (
-                    <Box component="tr" key={item.id}>
-                      <Box component="td" sx={{ p: 1, borderBottom: '1px solid', borderColor: 'divider' }}>
-                        {deviceTypeLabels[item.deviceType] || item.deviceType}
-                      </Box>
-                      <Box component="td" sx={{ p: 1, borderBottom: '1px solid', borderColor: 'divider', minWidth: 190 }}>
-                        {isPriceEditMode && canEditPriceList ? (
-                          <TextField size="small" value={item.model} onChange={(event) => updatePriceItem(item.id, { model: event.target.value })} />
-                        ) : (
-                          item.model
-                        )}
-                      </Box>
-                      <Box component="td" sx={{ p: 1, borderBottom: '1px solid', borderColor: 'divider', minWidth: 210 }}>
-                        {isPriceEditMode && canEditPriceList ? (
-                          <TextField size="small" value={item.workName} onChange={(event) => updatePriceItem(item.id, { workName: event.target.value })} />
-                        ) : (
-                          item.workName
-                        )}
-                      </Box>
-                      <Box component="td" sx={{ p: 1, borderBottom: '1px solid', borderColor: 'divider', minWidth: 180 }}>
-                        {isPriceEditMode && canEditPriceList ? (
-                          <TextField size="small" value={item.partName} onChange={(event) => updatePriceItem(item.id, { partName: event.target.value })} />
-                        ) : (
-                          item.partName || '-'
-                        )}
-                      </Box>
-                      <Box component="td" sx={{ p: 1, borderBottom: '1px solid', borderColor: 'divider', width: 130 }}>
-                        {isPriceEditMode && canEditPriceList ? (
-                          <TextField
-                            size="small"
-                            type="number"
-                            value={item.partCost}
-                            onChange={(event) => updatePriceItem(item.id, { partCost: Number(event.target.value) || 0 })}
-                          />
-                        ) : (
-                          `${Number(item.partCost || 0).toLocaleString('ru-RU')} ₽`
-                        )}
-                      </Box>
-                      <Box component="td" sx={{ p: 1, borderBottom: '1px solid', borderColor: 'divider', width: 130 }}>
-                        {isPriceEditMode && canEditPriceList ? (
-                          <TextField
-                            size="small"
-                            type="number"
-                            value={item.workCost}
-                            onChange={(event) => updatePriceItem(item.id, { workCost: Number(event.target.value) || 0 })}
-                          />
-                        ) : (
-                          `${Number(item.workCost || 0).toLocaleString('ru-RU')} ₽`
-                        )}
-                      </Box>
-                      <Box component="td" sx={{ p: 1, borderBottom: '1px solid', borderColor: 'divider', fontWeight: 800, color: 'primary.main' }}>
-                        {total.toLocaleString('ru-RU')} ₽
-                      </Box>
-                      {isPriceEditMode && (
-                        <Box component="td" sx={{ p: 1, borderBottom: '1px solid', borderColor: 'divider', width: 52 }}>
-                          {canEditPriceList && (
-                            <IconButton size="small" color="error" onClick={() => deletePriceItem(item.id)}>
-                              <Delete fontSize="small" />
-                            </IconButton>
-                          )}
-                        </Box>
-                      )}
-                    </Box>
-                  );
-                })}
-              </Box>
-            </Box>
-          </Box>
-          </Box>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            Показано {filteredPriceList.length} строк. Используйте фильтры или поиск, чтобы быстрее найти нужную модель и работу.
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={closePriceListDialog}>Закрыть</Button>
-        </DialogActions>
-      </Dialog>
+        canEdit={user?.role === 'admin'}
+        onClose={() => setIsPriceDialogOpen(false)}
+      />
 
       <Dialog
         open={isQuickSaleDialogOpen}
@@ -6942,7 +5387,9 @@ const Orders: React.FC = () => {
         maxWidth="sm"
         fullWidth
       >
-        <DialogTitle>{activeQuickSaleOption?.label || 'Быстрая продажа'}</DialogTitle>
+        <DialogTitle>
+          {activeQuickSaleOption?.label || 'Быстрая продажа'}
+        </DialogTitle>
         <DialogContent>
           <Grid container spacing={2} sx={{ mt: 0.5 }}>
             <Grid item xs={12}>
@@ -7034,62 +5481,7 @@ const Orders: React.FC = () => {
             Отмена
           </Button>
           <Button variant="contained" onClick={handleCreateQuickSale}>
-            Провести продажу
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog
-        open={isQuickCleaningDialogOpen}
-        onClose={() => setIsQuickCleaningDialogOpen(false)}
-        maxWidth="xs"
-        fullWidth
-      >
-        <DialogTitle>Чистка устройства</DialogTitle>
-        <DialogContent>
-          <Grid container spacing={2} sx={{ mt: 0.5 }}>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                type="number"
-                label="Цена чистки"
-                value={quickCleaningForm.salePrice}
-                onChange={(e) => setQuickCleaningForm((prev) => ({ ...prev, salePrice: e.target.value }))}
-                InputProps={{ startAdornment: <InputAdornment position="start">₽</InputAdornment> }}
-              />
-            </Grid>
-            <Grid item xs={12}>
-              <FormControl fullWidth>
-                <InputLabel>Оплата</InputLabel>
-                <Select
-                  value={quickCleaningForm.paymentMethod}
-                  label="Оплата"
-                  onChange={(e) => setQuickCleaningForm((prev) => ({ ...prev, paymentMethod: e.target.value }))}
-                >
-                  {enabledPaymentMethods.map((method) => (
-                    <MenuItem key={method.code} value={method.code}>
-                      {method.label}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                multiline
-                rows={3}
-                label="Комментарий"
-                value={quickCleaningForm.note}
-                onChange={(e) => setQuickCleaningForm((prev) => ({ ...prev, note: e.target.value }))}
-              />
-            </Grid>
-          </Grid>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsQuickCleaningDialogOpen(false)}>Отмена</Button>
-          <Button variant="contained" onClick={handleCreateQuickCleaning}>
-            Провести
+            Создать заказ
           </Button>
         </DialogActions>
       </Dialog>
@@ -7135,19 +5527,52 @@ const Orders: React.FC = () => {
       </Dialog>
 
       {/* Document Generator */}
-      <DocumentGenerator
-        open={isDocumentDialogOpen}
-        onClose={() => setIsDocumentDialogOpen(false)}
-        document={selectedDocument}
-        documentType={documentType}
-        onSign={handleDocumentSign}
-      />
+      {isDocumentDialogOpen && (
+        <React.Suspense fallback={null}>
+          <DocumentGenerator
+            open={isDocumentDialogOpen}
+            onClose={() => setIsDocumentDialogOpen(false)}
+            document={selectedDocument}
+            documentType={documentType}
+            onSign={handleDocumentSign}
+          />
+        </React.Suspense>
+      )}
 
       {/* Create Order Form */}
-      <CreateOrderForm
-        open={isCreateOrderFormOpen}
-        onClose={() => setIsCreateOrderFormOpen(false)}
-        onSubmit={handleOrderFormSubmit}
+      {isCreateOrderFormOpen && (
+        <React.Suspense fallback={null}>
+          <CreateOrderForm
+            open={isCreateOrderFormOpen}
+            onClose={() => setIsCreateOrderFormOpen(false)}
+            onSubmit={handleOrderFormSubmit}
+          />
+        </React.Suspense>
+      )}
+
+      <DataExchangeDialog
+        open={dataExchangeOpen}
+        onClose={() => setDataExchangeOpen(false)}
+        title="Импорт и экспорт заказов"
+        entityLabel="заказов"
+        fileBaseName="zakazy"
+        sheetName="Заказы"
+        columns={ORDER_EXCHANGE_COLUMNS}
+        exportRows={orderExchangeExportRows}
+        templateSamples={orderTemplateSamples()}
+        onImport={(rows, options) =>
+          importOrderRows(rows, {
+            ...options,
+            defaultStatus: defaultOpenStatusCode,
+            intakeManagerName: user?.name || 'Импорт',
+          })
+        }
+        onImported={async () => {
+          const savedOrders = await orderService.getOrders({ lite: true });
+          setOrdersData(savedOrders);
+          await clientService.refreshFromApi();
+          setOrderClients(clientService.getClients());
+        }}
       />
     </Box>
   );

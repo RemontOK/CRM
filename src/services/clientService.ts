@@ -1,8 +1,9 @@
 import { Client } from '../types';
 import { apiService } from './api';
 import { normalizePhoneForCompare, normalizePhoneForStorage } from '../utils/phone';
+import { getStoredTenantId, tenantStorageKey } from '../utils/tenantStorage';
 
-const CLIENT_STORAGE_KEY = 'crm_clients';
+const CLIENT_STORAGE_BASE = 'crm_clients';
 
 const normalizeClient = (client: Client): Client => ({
   ...client,
@@ -12,18 +13,21 @@ const normalizeClient = (client: Client): Client => ({
   email: client.email || '',
   address: client.address || '',
   notes: client.notes || '',
+  customFields: client.customFields || {},
 });
 
 class ClientService {
   private clients: Client[] = [];
+  private cacheTenantId: number | null = null;
 
-  constructor() {
-    this.loadFromCache();
-    void this.refreshFromApi();
+  private storageKey() {
+    return tenantStorageKey(CLIENT_STORAGE_BASE, this.cacheTenantId ?? getStoredTenantId());
   }
 
   private loadFromCache() {
-    const saved = localStorage.getItem(CLIENT_STORAGE_KEY);
+    const tenantId = getStoredTenantId();
+    this.cacheTenantId = tenantId;
+    const saved = localStorage.getItem(this.storageKey());
     if (!saved) {
       this.clients = [];
       return;
@@ -37,27 +41,63 @@ class ClientService {
   }
 
   private saveToCache() {
-    localStorage.setItem(CLIENT_STORAGE_KEY, JSON.stringify(this.clients));
+    if (!localStorage.getItem('token')) {
+      return;
+    }
+    localStorage.setItem(this.storageKey(), JSON.stringify(this.clients));
+  }
+
+  clearSession() {
+    this.clients = [];
+    this.cacheTenantId = null;
+    localStorage.removeItem(tenantStorageKey(CLIENT_STORAGE_BASE, getStoredTenantId()));
+    localStorage.removeItem(CLIENT_STORAGE_BASE);
   }
 
   async refreshFromApi() {
+    if (!localStorage.getItem('token')) {
+      this.clients = [];
+      return [];
+    }
+
+    const tenantId = getStoredTenantId();
+    if (this.cacheTenantId !== tenantId) {
+      this.clients = [];
+      this.cacheTenantId = tenantId;
+    }
+
     try {
       const clients = await apiService.get<Client[]>('/clients');
       this.clients = clients.map((client) => normalizeClient(client));
       this.saveToCache();
     } catch {
-      // keep cache if API unavailable
+      this.loadFromCache();
     }
     return [...this.clients];
   }
 
   getClients(): Client[] {
+    const tenantId = getStoredTenantId();
+    if (this.cacheTenantId !== tenantId) {
+      this.loadFromCache();
+    }
     return [...this.clients];
   }
 
   findClientByPhone(phone: string): Client | null {
     const normalizedPhone = normalizePhoneForCompare(phone);
     return this.clients.find((client) => normalizePhoneForCompare(client.phone) === normalizedPhone) || null;
+  }
+
+  searchClientsByPhone(query: string, limit = 8): Client[] {
+    const normalizedQuery = normalizePhoneForCompare(query);
+    if (normalizedQuery.length < 3) {
+      return [];
+    }
+
+    return this.clients
+      .filter((client) => normalizePhoneForCompare(client.phone).includes(normalizedQuery))
+      .slice(0, limit);
   }
 
   async createClient(clientData: Partial<Client>): Promise<Client> {
@@ -69,6 +109,7 @@ class ClientService {
       email: clientData.email || '',
       address: clientData.address || '',
       notes: clientData.notes || '',
+      customFields: clientData.customFields || {},
       totalOrders: clientData.totalOrders ?? 0,
       totalSpent: clientData.totalSpent ?? 0,
       lastOrderDate: clientData.lastOrderDate ?? null,
@@ -80,55 +121,32 @@ class ClientService {
     return created;
   }
 
-  async updateClient(id: string, updates: Partial<Client>): Promise<Client | null> {
-    try {
-      const updated = normalizeClient(
-        await apiService.put<Client>(`/clients/${id}`, {
-          ...updates,
-          ...(updates.phone !== undefined ? { phone: normalizePhoneForStorage(updates.phone) } : {}),
-        })
-      );
-      this.clients = this.clients.map((item) => (item.id === id ? updated : item));
-      this.saveToCache();
-      return updated;
-    } catch {
-      return null;
-    }
+  async updateClient(id: string, updates: Partial<Client>): Promise<Client> {
+    const payload = {
+      ...updates,
+      ...(updates.phone !== undefined ? { phone: normalizePhoneForStorage(updates.phone) } : {}),
+    };
+    const updated = normalizeClient(await apiService.put<Client>(`/clients/${id}`, payload));
+    this.clients = this.clients.map((client) => (client.id === id ? updated : client));
+    this.saveToCache();
+    return updated;
   }
 
-  async saveClient(client: Client): Promise<Client> {
-    if (this.clients.some((item) => item.id === client.id)) {
-      const updated = await this.updateClient(client.id, client);
-      if (!updated) {
-        throw new Error('Не удалось обновить клиента');
-      }
-      return updated;
-    }
-
-    return this.createClient(client);
+  async deleteClient(id: string): Promise<void> {
+    await apiService.delete(`/clients/${id}`);
+    this.clients = this.clients.filter((client) => client.id !== id);
+    this.saveToCache();
   }
 
-  async deleteClient(id: string): Promise<boolean> {
-    try {
-      await apiService.delete(`/clients/${id}`);
-      this.clients = this.clients.filter((client) => client.id !== id);
-      this.saveToCache();
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async updateClientStats(clientId: string, orderAmount: number): Promise<void> {
-    const client = this.clients.find((item) => item.id === clientId);
-    if (!client) {
-      return;
+  async findOrCreateClientByPhone(phone: string, defaults: Partial<Client> = {}): Promise<Client> {
+    const existing = this.findClientByPhone(phone);
+    if (existing) {
+      return existing;
     }
 
-    await this.updateClient(clientId, {
-      totalOrders: (client.totalOrders || 0) + 1,
-      totalSpent: (client.totalSpent || 0) + orderAmount,
-      lastOrderDate: new Date().toISOString(),
+    return this.createClient({
+      ...defaults,
+      phone,
     });
   }
 }

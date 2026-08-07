@@ -1,7 +1,8 @@
 import { CashOperation } from '../types';
 import { apiService } from './api';
+import { getStoredTenantId, tenantStorageKey } from '../utils/tenantStorage';
 
-const CASH_STORAGE_KEY = 'crm_cash_operations';
+const CASH_STORAGE_BASE = 'crm_cash_operations';
 
 const normalizeOperation = (operation: CashOperation): CashOperation => ({
   ...operation,
@@ -19,14 +20,16 @@ const normalizeOperation = (operation: CashOperation): CashOperation => ({
 
 class CashService {
   private operations: CashOperation[] = [];
+  private cacheTenantId: number | null = null;
 
-  constructor() {
-    this.loadFromCache();
-    void this.refreshFromApi();
+  private storageKey() {
+    return tenantStorageKey(CASH_STORAGE_BASE, this.cacheTenantId ?? getStoredTenantId());
   }
 
   private loadFromCache() {
-    const saved = localStorage.getItem(CASH_STORAGE_KEY);
+    const tenantId = getStoredTenantId();
+    this.cacheTenantId = tenantId;
+    const saved = localStorage.getItem(this.storageKey());
     if (!saved) {
       this.operations = [];
       return;
@@ -40,22 +43,47 @@ class CashService {
   }
 
   private saveToCache() {
-    localStorage.setItem(CASH_STORAGE_KEY, JSON.stringify(this.operations));
+    if (!localStorage.getItem('token')) {
+      return;
+    }
+    localStorage.setItem(this.storageKey(), JSON.stringify(this.operations));
+  }
+
+  clearSession() {
+    this.operations = [];
+    this.cacheTenantId = null;
+    localStorage.removeItem(tenantStorageKey(CASH_STORAGE_BASE, getStoredTenantId()));
+    localStorage.removeItem(CASH_STORAGE_BASE);
   }
 
   async refreshFromApi() {
+    if (!localStorage.getItem('token')) {
+      this.operations = [];
+      return [];
+    }
+
+    const tenantId = getStoredTenantId();
+    if (this.cacheTenantId !== tenantId) {
+      this.operations = [];
+      this.cacheTenantId = tenantId;
+    }
+
     try {
       const operations = await apiService.get<CashOperation[]>('/cash/operations');
       this.operations = operations.map((operation) => normalizeOperation(operation));
       this.saveToCache();
     } catch {
-      // keep cache
+      this.loadFromCache();
     }
 
     return [...this.operations];
   }
 
   getOperations() {
+    const tenantId = getStoredTenantId();
+    if (this.cacheTenantId !== tenantId) {
+      this.loadFromCache();
+    }
     return [...this.operations];
   }
 

@@ -42,9 +42,12 @@ import { cashService } from '../../services/cashService';
 import { taxonomyService } from '../../services/taxonomyService';
 import { employeeService } from '../../services/employeeService';
 import PeriodFilter from '../../components/PeriodFilter/PeriodFilter';
-import { heroCardSx, pageShellSx, panelCardSx, sectionTitleSx, toolbarCardSx } from '../../styles/ui';
+import { dataGridSx, heroCardSx, pageShellSx, panelCardSx, sectionTitleSx, toolbarCardSx } from '../../styles/ui';
+import { useCompanyName } from '../../hooks/useCompanyName';
 import { crmColors } from '../../styles/tokens';
 import { defaultPeriodFilterValue, isDateWithinRange, PeriodFilterValue } from '../../utils/dateRange';
+import { getPaymentMethodLabel } from '../../utils/paymentMethod';
+import { appSettingsService } from '../../services/appSettingsService';
 
 const emptyOperation = {
   type: 'income',
@@ -67,6 +70,7 @@ const getSavedGridPageSize = (key: string) => {
 };
 
 const CashRegister: React.FC = () => {
+  const companyName = useCompanyName();
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
   const [isCategoryDialogOpen, setIsCategoryDialogOpen] = useState(false);
@@ -268,15 +272,7 @@ const CashRegister: React.FC = () => {
         <Chip
           size="small"
           variant="outlined"
-          label={
-            params.value === 'card'
-              ? 'Карта'
-              : params.value === 'transfer'
-                ? 'Перевод'
-                : params.value === 'installment'
-                  ? 'Рассрочка'
-                  : 'Наличные'
-          }
+          label={getPaymentMethodLabel(params.value, appSettingsService.getSettings().payment.paymentMethodOptions)}
         />
       ),
     },
@@ -339,7 +335,7 @@ const CashRegister: React.FC = () => {
           ФИНАНСЫ · КАССА
         </Typography>
         <Typography variant="h3" sx={{ mt: 1.5, mb: 1.5, color: 'common.white' }}>
-          Касса НЭК Сервис
+          Касса {companyName}
         </Typography>
         <Typography sx={{ maxWidth: 760, color: 'rgba(255,255,255,0.78)' }}>
           Журнал всех денежных операций по ремонту, продажам, закупкам и внутренним расходам.
@@ -377,10 +373,26 @@ const CashRegister: React.FC = () => {
 
       <Card sx={toolbarCardSx}>
         <CardContent>
-          <Grid container spacing={2} alignItems="center">
+          <Grid
+            container
+            spacing={2}
+            alignItems="center"
+            sx={{
+              '& .MuiOutlinedInput-root': {
+                height: 40,
+                boxSizing: 'border-box',
+              },
+              '& .MuiButton-root': {
+                height: 40,
+                minHeight: 40,
+                boxSizing: 'border-box',
+              },
+            }}
+          >
             <Grid item xs={12} md={4}>
               <TextField
                 fullWidth
+                size="small"
                 placeholder="Поиск по операциям, заказу или сотруднику"
                 value={searchTerm}
                 onChange={(event) => setSearchTerm(event.target.value)}
@@ -394,9 +406,14 @@ const CashRegister: React.FC = () => {
               />
             </Grid>
             <Grid item xs={12} md={2}>
-              <FormControl fullWidth>
-                <InputLabel>Тип</InputLabel>
-                <Select value={filterType} label="Тип" onChange={(event) => setFilterType(event.target.value)}>
+              <FormControl fullWidth size="small">
+                <InputLabel id="cash-filter-type-label">Тип</InputLabel>
+                <Select
+                  labelId="cash-filter-type-label"
+                  value={filterType}
+                  label="Тип"
+                  onChange={(event) => setFilterType(event.target.value)}
+                >
                   <MenuItem value="all">Все</MenuItem>
                   <MenuItem value="income">Доход</MenuItem>
                   <MenuItem value="expense">Расход</MenuItem>
@@ -404,9 +421,14 @@ const CashRegister: React.FC = () => {
               </FormControl>
             </Grid>
             <Grid item xs={12} md={2}>
-              <FormControl fullWidth>
-                <InputLabel>Категория</InputLabel>
-                <Select value={filterCategory} label="Категория" onChange={(event) => setFilterCategory(event.target.value)}>
+              <FormControl fullWidth size="small">
+                <InputLabel id="cash-filter-category-label">Категория</InputLabel>
+                <Select
+                  labelId="cash-filter-category-label"
+                  value={filterCategory}
+                  label="Категория"
+                  onChange={(event) => setFilterCategory(event.target.value)}
+                >
                   <MenuItem value="all">Все</MenuItem>
                   {cashCategories.map((category) => (
                     <MenuItem key={category.id} value={category.name}>
@@ -416,7 +438,7 @@ const CashRegister: React.FC = () => {
                 </Select>
               </FormControl>
             </Grid>
-            <PeriodFilter value={periodFilter} onChange={setPeriodFilter} />
+            <PeriodFilter value={periodFilter} onChange={setPeriodFilter} size="small" />
             <Grid item xs={12} md={2}>
               <Button
                 fullWidth
@@ -460,17 +482,7 @@ const CashRegister: React.FC = () => {
               }}
               disableSelectionOnClick
               sx={{
-                border: 'none',
-                '& .MuiDataGrid-cell': {
-                  borderBottom: `1px solid ${crmColors.line}`,
-                },
-                '& .MuiDataGrid-columnHeaders': {
-                  backgroundColor: '#f8fafc',
-                  borderBottom: `1px solid ${crmColors.lineStrong}`,
-                },
-                '& .MuiDataGrid-columnSeparator': {
-                  display: 'none',
-                },
+                ...dataGridSx,
               }}
             />
           </Box>

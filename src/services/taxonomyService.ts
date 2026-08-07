@@ -5,43 +5,6 @@ const STORAGE_KEY = 'crm_taxonomy_nodes';
 
 type TaxonomyScope = TaxonomyNode['scope'];
 
-const defaultNodeDefinitions: Record<TaxonomyScope, Array<{ name: string; parentName?: string }>> = {
-  inventory: [
-    { name: 'Экраны' },
-    { name: 'Батареи' },
-    { name: 'Корпуса' },
-    { name: 'Камеры' },
-    { name: 'Клавиатуры' },
-    { name: 'Процессоры' },
-    { name: 'Память' },
-    { name: 'Прочее' },
-    { name: 'Защита экрана' },
-    { name: 'Аксессуары' },
-    { name: 'Товары' },
-  ],
-  cash: [
-    { name: 'Ремонт' },
-    { name: 'Продажи' },
-    { name: 'Закупки' },
-    { name: 'Зарплата' },
-    { name: 'Расходы сервиса' },
-    { name: 'Прочее' },
-  ],
-  employee_departments: [
-    { name: 'Ремонт' },
-    { name: 'Управление' },
-    { name: 'Касса' },
-    { name: 'Администрация' },
-  ],
-  employee_positions: [
-    { name: 'Техник' },
-    { name: 'Менеджер' },
-    { name: 'Кассир' },
-    { name: 'Администратор' },
-    { name: 'Директор' },
-  ],
-};
-
 const normalizeNode = (node: TaxonomyNode): TaxonomyNode => ({
   ...node,
   parentId: node.parentId || null,
@@ -69,66 +32,30 @@ class TaxonomyService {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(this.nodes));
   }
 
+  clearSession() {
+    this.nodes = [];
+    this.refreshPromise = null;
+    localStorage.removeItem(STORAGE_KEY);
+  }
+
   private syncNodes(nodes: TaxonomyNode[]) {
     this.nodes = nodes.map(normalizeNode);
     this.saveCache();
-  }
-
-  private buildFallbackNodes(): TaxonomyNode[] {
-    const now = new Date();
-
-    return (Object.entries(defaultNodeDefinitions) as Array<[TaxonomyScope, Array<{ name: string; parentName?: string }>]>)
-      .flatMap(([scope, entries]) =>
-        entries.map((entry, index) => ({
-          id: `${scope}_${index + 1}`,
-          scope,
-          name: entry.name,
-          parentId: null,
-          createdAt: now,
-        }))
-      );
-  }
-
-  private async ensureDefaults(remoteNodes: TaxonomyNode[]) {
-    if (remoteNodes.length > 0) {
-      return remoteNodes;
-    }
-
-    const created: TaxonomyNode[] = [];
-
-    for (const [scope, entries] of Object.entries(defaultNodeDefinitions) as Array<
-      [TaxonomyScope, Array<{ name: string; parentName?: string }>]
-    >) {
-      for (const entry of entries) {
-        const parent = entry.parentName ? created.find((node) => node.scope === scope && node.name === entry.parentName) : undefined;
-        const node = await apiService.post<TaxonomyNode>('/taxonomy/nodes', {
-          scope,
-          name: entry.name,
-          parentId: parent?.id || null,
-        });
-        created.push(normalizeNode(node));
-      }
-    }
-
-    return created;
   }
 
   async refreshFromApi(): Promise<TaxonomyNode[]> {
     if (!this.refreshPromise) {
       this.refreshPromise = (async () => {
         try {
-          const remoteNodes = await apiService.get<TaxonomyNode[]>('/taxonomy/nodes');
-          const nodes = await this.ensureDefaults(remoteNodes.map(normalizeNode));
-          this.syncNodes(nodes);
-          return this.nodes;
+          const remoteNodes = (await apiService.get<TaxonomyNode[]>('/taxonomy/nodes')).map(normalizeNode);
+          this.syncNodes(remoteNodes);
         } catch {
-          if (this.nodes.length === 0) {
-            this.syncNodes(this.buildFallbackNodes());
-          }
-          return this.nodes;
+          // Keep cached nodes when offline; do not inject demo defaults.
         } finally {
           this.refreshPromise = null;
         }
+
+        return this.nodes;
       })();
     }
 

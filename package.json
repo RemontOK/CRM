@@ -29,6 +29,7 @@
     "react-router-dom": "^6.8.0",
     "recharts": "^2.5.0",
     "tinymce": "^8.5.0",
+    "xlsx": "^0.18.5",
     "yup": "^1.0.0"
   },
   "scripts": {
@@ -38,7 +39,14 @@
     "postbuild": "node scripts/copy-build-assets.cjs",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "deploy": "npm run build && npx gh-pages -d build"
+    "deploy": "npm run build && npx gh-pages -d build",
+    "deploy:prod": "npm run build && node scripts/deploy-prod.cjs",
+    "deploy:until-done": "npm run build && node scripts/deploy-until-done.cjs",
+    "deploy:ftp": "npm run build && node scripts/deploy-ftp.cjs",
+    "deploy:ftp:frontend": "npm run build && node scripts/deploy-ftp.cjs --frontend-only",
+    "deploy:ftp:api": "node scripts/deploy-ftp.cjs --api-only",
+    "deploy:ftp:all": "npm run build && node scripts/deploy-ftp-until-done.cjs",
+    "deploy:ftp:changed": "npm run build && node scripts/deploy-ftp-until-done.cjs --frontend-only"
   },
   "browserslist": {
     "production": [
@@ -55,6 +63,7 @@
   "devDependencies": {
     "@types/node": "^24.7.0",
     "@vitejs/plugin-react": "^5.0.4",
+    "basic-ftp": "^5.3.1",
     "gh-pages": "^6.3.0",
     "typescript": "^5.9.3",
     "vite": "^7.1.9"

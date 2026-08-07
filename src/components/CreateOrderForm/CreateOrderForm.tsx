@@ -22,8 +22,23 @@ import { AttachFile, CameraAlt, Close } from '@mui/icons-material';
 import { Controller, useForm } from 'react-hook-form';
 import { yupResolver } from '@hookform/resolvers/yup';
 import * as yup from 'yup';
+import toast from 'react-hot-toast';
 import { crmRadius } from '../../styles/tokens';
 import { appSettingsService } from '../../services/appSettingsService';
+import ClientTypeSelector, { getDefaultClientType } from '../ClientTypeSelector/ClientTypeSelector';
+import ClientFieldsForm from '../ClientFieldsForm/ClientFieldsForm';
+import ClientPhoneLookupField from '../ClientPhoneLookupField/ClientPhoneLookupField';
+import CommaAppendAutocomplete from '../CommaAppendAutocomplete/CommaAppendAutocomplete';
+import DeviceColorField from '../DeviceColorField/DeviceColorField';
+import { DEFAULT_EXTERNAL_DEVICE_CONDITION, EXTERNAL_DEVICE_DEFECTS, ORDER_APPEAL_REASONS } from '../../constants/deviceDefects';
+import { getIphoneColorsForModel, IPHONE_MODEL_OPTIONS } from '../../constants/iphoneModelColors';
+import { clientService } from '../../services/clientService';
+import {
+  collectClientFieldValues,
+  getEnabledClientFields,
+  OrderClientDraft,
+  validateClientFieldsForOrder,
+} from '../../utils/clientFieldUtils';
 
 interface CreateOrderFormProps {
   open: boolean;
@@ -72,6 +87,11 @@ const schema = yup.object({
   reasonForContact: yup.string().required('Опишите причину обращения'),
   password: yup.string().required('Укажите пароль или код блокировки'),
   completeness: yup.string().required('Опишите комплектацию'),
+  model: yup.string(),
+  appearance: yup.string(),
+  receptionistNotes: yup.string(),
+  estimatedPrice: yup.number().nullable(),
+  recommendations: yup.string(),
 });
 
 const sectionPaperSx = {
@@ -81,77 +101,25 @@ const sectionPaperSx = {
   boxShadow: '0 14px 32px rgba(15, 23, 42, 0.05)',
 };
 
-const deviceColorOptions = [
-  'Черный',
-  'Белый',
-  'Серый',
-  'Серебристый',
-  'Золотой',
-  'Синий',
-  'Голубой',
-  'Красный',
-  'Розовый',
-  'Зеленый',
-  'Фиолетовый',
-  'Желтый',
-  'Оранжевый',
-  'Коричневый',
-  'Бежевый',
-  'Графит',
-  'Титан',
-];
+const modelOptions = IPHONE_MODEL_OPTIONS.map((model) => `Apple ${model}`);
+
+const DEFAULT_ORDER_TYPES = [
+  { code: 'repair', label: 'Ремонт' },
+  { code: 'diagnostics', label: 'Диагностика' },
+  { code: 'accessories', label: 'Продажа аксессуаров' },
+  { code: 'warranty', label: 'Гарантийное обращение' },
+] as const;
 
 const CreateOrderForm: React.FC<CreateOrderFormProps> = ({ open, onClose, onSubmit }) => {
-  const settings = React.useMemo(() => appSettingsService.getSettings(), []);
-  const orderTypes = React.useMemo(
-    () => settings.forms.orderTypes.filter((item) => item.enabled).sort((a, b) => a.sortOrder - b.sortOrder),
-    [settings.forms.orderTypes]
-  );
-  const clientTypes = React.useMemo(
-    () => settings.forms.clientTypes.filter((item) => item.enabled).sort((a, b) => a.sortOrder - b.sortOrder),
-    [settings.forms.clientTypes]
-  );
+  const [settings, setSettings] = React.useState(() => appSettingsService.getSettings());
+  const [clients, setClients] = React.useState(() => clientService.getClients());
 
-  const mandatoryOrderFields = React.useMemo(
-    () => new Set(['clientName', 'phone', 'color', 'serialNumber', 'imei', 'reasonForContact', 'password', 'completeness']),
-    []
-  );
-
-  const orderFieldsByCode = React.useMemo(
-    () => new Map(settings.forms.orderFields.map((item) => [item.code, item])),
-    [settings.forms.orderFields]
-  );
-
-  const clientFieldsByCode = React.useMemo(
-    () => new Map(settings.forms.clientFields.map((item) => [item.code, item])),
-    [settings.forms.clientFields]
-  );
   const orderCreateModeLabel = settings.orders.createMode === 'single' ? 'одна форма' : 'пошаговый мастер';
-
-  const isOrderFieldVisible = React.useCallback(
-    (code: string) => mandatoryOrderFields.has(code) || Boolean(orderFieldsByCode.get(code)?.enabled),
-    [mandatoryOrderFields, orderFieldsByCode]
-  );
-
-  const isClientFieldVisible = React.useCallback(
-    (code: string) => Boolean(clientFieldsByCode.get(code)?.enabled),
-    [clientFieldsByCode]
-  );
-
-  const getOrderFieldLabel = React.useCallback(
-    (code: string, fallback: string) => orderFieldsByCode.get(code)?.label || fallback,
-    [orderFieldsByCode]
-  );
-
-  const getClientFieldLabel = React.useCallback(
-    (code: string, fallback: string) => clientFieldsByCode.get(code)?.label || fallback,
-    [clientFieldsByCode]
-  );
 
   const defaultFormValues = React.useMemo<OrderFormData>(
     () => ({
-      orderType: orderTypes[0]?.code || 'paid',
-      clientType: clientTypes[0]?.code || 'individual',
+      orderType: DEFAULT_ORDER_TYPES[0].code,
+      clientType: getDefaultClientType(settings),
       clientName: '',
       phone: '',
       manager: 'Администратор',
@@ -160,10 +128,11 @@ const CreateOrderForm: React.FC<CreateOrderFormProps> = ({ open, onClose, onSubm
       serialNumber: '',
       imei: '',
       reasonForContact: '',
+      appearance: DEFAULT_EXTERNAL_DEVICE_CONDITION,
       password: '',
       completeness: '',
     }),
-    [clientTypes, orderTypes]
+    [settings]
   );
 
   const {
@@ -171,13 +140,49 @@ const CreateOrderForm: React.FC<CreateOrderFormProps> = ({ open, onClose, onSubm
     handleSubmit,
     formState: { errors, isSubmitting },
     reset,
+    setValue,
+    watch,
   } = useForm<OrderFormData>({
     resolver: yupResolver(schema),
     defaultValues: defaultFormValues,
   });
 
+  const phoneValue = watch('phone');
+  const clientTypeValue = watch('clientType');
+  const modelValue = watch('model');
+  const colorValue = watch('color');
+
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    void clientService.refreshFromApi().then(() => {
+      setClients(clientService.getClients());
+    });
+  }, [open]);
+
+  const applyClientDraft = React.useCallback(
+    (draft: OrderClientDraft) => {
+      setValue('phone', draft.clientPhone);
+      setValue('clientName', draft.clientName);
+      setValue('clientType', draft.clientType);
+      for (const field of getEnabledClientFields(settings)) {
+        setValue(field.code, draft.clientFieldValues[field.code] || '');
+      }
+    },
+    [setValue, settings]
+  );
+
   const handleFormSubmit = async (data: OrderFormData) => {
-    await onSubmit(data);
+    const clientFieldValues = collectClientFieldValues(settings, data);
+    const clientFieldError = validateClientFieldsForOrder(settings, data.clientType, clientFieldValues);
+    if (clientFieldError) {
+      toast.error(clientFieldError);
+      return;
+    }
+
+    await onSubmit({ ...data, ...clientFieldValues });
     reset(defaultFormValues);
     onClose();
   };
@@ -215,48 +220,43 @@ const CreateOrderForm: React.FC<CreateOrderFormProps> = ({ open, onClose, onSubm
                 name="clientType"
                 control={control}
                 render={({ field }) => (
-                  <FormControl component="fieldset" sx={{ mb: 2 }}>
-                    <RadioGroup {...field} row>
-                      {clientTypes.map((type) => (
-                        <FormControlLabel key={type.id} value={type.code} control={<Radio size="small" />} label={type.label} />
-                      ))}
-                    </RadioGroup>
-                  </FormControl>
+                  <ClientTypeSelector
+                    value={field.value}
+                    onChange={field.onChange}
+                    settings={settings}
+                    onSettingsUpdated={setSettings}
+                  />
                 )}
               />
 
               <Grid container spacing={2}>
-                <Grid item xs={12}>
-                  <FormField control={control} name="clientName" label={getOrderFieldLabel('clientName', 'Клиент')} error={errors.clientName?.message} />
+                <Grid item xs={12} md={6}>
+                  <ClientPhoneLookupField
+                    settings={settings}
+                    clients={clients}
+                    phone={phoneValue || ''}
+                    onPhoneChange={(value) => setValue('phone', value)}
+                    onClientSelect={applyClientDraft}
+                    label="Телефон"
+                    size="small"
+                    required
+                  />
+                  {errors.phone?.message ? (
+                    <Typography variant="caption" color="error" sx={{ mt: 0.5, display: 'block' }}>
+                      {errors.phone.message}
+                    </Typography>
+                  ) : null}
                 </Grid>
                 <Grid item xs={12}>
-                  <FormField control={control} name="phone" label={getOrderFieldLabel('phone', 'Телефон')} error={errors.phone?.message} />
+                  <FormField
+                    control={control}
+                    name="clientName"
+                    label={clientTypeValue === 'company' ? 'Название компании' : 'Клиент'}
+                    error={errors.clientName?.message}
+                    required
+                  />
                 </Grid>
-                {isClientFieldVisible('email') && (
-                  <Grid item xs={12}>
-                    <FormField control={control} name="email" label={getClientFieldLabel('email', 'Email')} />
-                  </Grid>
-                )}
-                {isClientFieldVisible('howDidYouKnow') && (
-                  <Grid item xs={12}>
-                    <FormField control={control} name="howDidYouKnow" label={getClientFieldLabel('howDidYouKnow', 'Источник обращения')} />
-                  </Grid>
-                )}
-                {isClientFieldVisible('clientComment') && (
-                  <Grid item xs={12}>
-                    <FormField control={control} name="clientComment" label={getClientFieldLabel('clientComment', 'Заметка по клиенту')} multiline rows={2} />
-                  </Grid>
-                )}
-                {isClientFieldVisible('discount') && (
-                  <Grid item xs={12} md={6}>
-                    <FormField control={control} name="discount" label={getClientFieldLabel('discount', 'Скидка')} />
-                  </Grid>
-                )}
-                {isClientFieldVisible('birthday') && (
-                  <Grid item xs={12} md={6}>
-                    <FormField control={control} name="birthday" label={getClientFieldLabel('birthday', 'Дата рождения')} type="date" InputLabelProps={{ shrink: true }} />
-                  </Grid>
-                )}
+                <ClientFieldsForm settings={settings} control={control} clientType={clientTypeValue} />
               </Grid>
             </Paper>
 
@@ -268,9 +268,6 @@ const CreateOrderForm: React.FC<CreateOrderFormProps> = ({ open, onClose, onSubm
                 </Grid>
                 <Grid item xs={12} md={6}>
                   <NumberField control={control} name="advance" label="Аванс" />
-                </Grid>
-                <Grid item xs={12}>
-                  <FormField control={control} name="performer" label="Исполнитель" />
                 </Grid>
                 <Grid item xs={12}>
                   <FormField control={control} name="manager" label="Менеджер приема" error={errors.manager?.message} />
@@ -292,8 +289,8 @@ const CreateOrderForm: React.FC<CreateOrderFormProps> = ({ open, onClose, onSubm
                   render={({ field }) => (
                     <FormControl component="fieldset">
                       <RadioGroup {...field} row>
-                        {orderTypes.map((type) => (
-                          <FormControlLabel key={type.id} value={type.code} control={<Radio size="small" />} label={type.label} />
+                        {DEFAULT_ORDER_TYPES.map((type) => (
+                          <FormControlLabel key={type.code} value={type.code} control={<Radio size="small" />} label={type.label} />
                         ))}
                       </RadioGroup>
                     </FormControl>
@@ -302,49 +299,139 @@ const CreateOrderForm: React.FC<CreateOrderFormProps> = ({ open, onClose, onSubm
               </Box>
 
               <Grid container spacing={2}>
-                {isOrderFieldVisible('model') && (
-                  <Grid item xs={12} md={6}>
-                    <FormField control={control} name="model" label={getOrderFieldLabel('model', 'Модель')} />
-                  </Grid>
-                )}
                 <Grid item xs={12} md={6}>
-                  <ColorField control={control} name="color" label={getOrderFieldLabel('color', 'Цвет')} error={errors.color?.message} />
+                  <Controller
+                    name="model"
+                    control={control}
+                    render={({ field }) => (
+                      <Autocomplete
+                        freeSolo
+                        options={modelOptions}
+                        value={field.value ?? ''}
+                        inputValue={field.value ?? ''}
+                        onChange={(_, value) => {
+                          const nextModel = value ?? '';
+                          field.onChange(nextModel);
+                          const colors = getIphoneColorsForModel(nextModel);
+                          if (
+                            colors.length > 0 &&
+                            colorValue &&
+                            !colors.some((color) => color.toLowerCase() === String(colorValue).trim().toLowerCase())
+                          ) {
+                            setValue('color', '');
+                          }
+                        }}
+                        onInputChange={(_, value) => field.onChange(value)}
+                        renderInput={(params) => (
+                          <TextField {...params} label="Модель" fullWidth size="small" />
+                        )}
+                      />
+                    )}
+                  />
                 </Grid>
                 <Grid item xs={12} md={6}>
-                  <FormField control={control} name="serialNumber" label={getOrderFieldLabel('serialNumber', 'Серийный номер')} error={errors.serialNumber?.message} />
+                  <Controller
+                    name="color"
+                    control={control}
+                    render={({ field }) => (
+                      <DeviceColorField
+                        value={field.value ?? ''}
+                        onChange={field.onChange}
+                        deviceModel={modelValue}
+                        label="Цвет"
+                        size="small"
+                        required
+                        error={!!errors.color?.message}
+                        helperText={errors.color?.message}
+                      />
+                    )}
+                  />
                 </Grid>
                 <Grid item xs={12} md={6}>
-                  <FormField control={control} name="imei" label={getOrderFieldLabel('imei', 'IMEI / идентификатор')} error={errors.imei?.message} />
+                  <FormField
+                    control={control}
+                    name="serialNumber"
+                    label="Серийный номер"
+                    error={errors.serialNumber?.message}
+                    required
+                  />
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <FormField
+                    control={control}
+                    name="imei"
+                    label="IMEI / идентификатор"
+                    error={errors.imei?.message}
+                    required
+                  />
                 </Grid>
                 <Grid item xs={12}>
-                  <FormField control={control} name="reasonForContact" label={getOrderFieldLabel('reasonForContact', 'Причина обращения')} error={errors.reasonForContact?.message} multiline rows={2} />
+                  <Controller
+                    name="reasonForContact"
+                    control={control}
+                    render={({ field }) => (
+                      <CommaAppendAutocomplete
+                        label="Причина обращения"
+                        value={field.value ?? ''}
+                        onChange={field.onChange}
+                        options={ORDER_APPEAL_REASONS}
+                        placeholder="Выберите причину или введите свою"
+                        helperText={errors.reasonForContact?.message}
+                        error={!!errors.reasonForContact?.message}
+                        required
+                        multiline
+                        rows={2}
+                        size="small"
+                      />
+                    )}
+                  />
                 </Grid>
-                {isOrderFieldVisible('appearance') && (
-                  <Grid item xs={12}>
-                    <FormField control={control} name="appearance" label={getOrderFieldLabel('appearance', 'Внешний вид')} multiline rows={2} />
-                  </Grid>
-                )}
+                <Grid item xs={12}>
+                  <Controller
+                    name="appearance"
+                    control={control}
+                    render={({ field }) => (
+                      <CommaAppendAutocomplete
+                        label="Внешний вид"
+                        value={field.value ?? DEFAULT_EXTERNAL_DEVICE_CONDITION}
+                        onChange={field.onChange}
+                        options={EXTERNAL_DEVICE_DEFECTS}
+                        placeholder="Выберите дефект или введите свой"
+                        clearFallback={DEFAULT_EXTERNAL_DEVICE_CONDITION}
+                        multiline
+                        rows={2}
+                        size="small"
+                      />
+                    )}
+                  />
+                </Grid>
                 <Grid item xs={12} md={6}>
-                  <FormField control={control} name="password" label={getOrderFieldLabel('password', 'Пароль / код блокировки')} error={errors.password?.message} />
+                  <FormField
+                    control={control}
+                    name="password"
+                    label="Пароль / код блокировки"
+                    error={errors.password?.message}
+                    required
+                  />
                 </Grid>
                 <Grid item xs={12} md={6}>
-                  <FormField control={control} name="completeness" label={getOrderFieldLabel('completeness', 'Комплектация')} error={errors.completeness?.message} />
+                  <FormField
+                    control={control}
+                    name="completeness"
+                    label="Комплектация"
+                    error={errors.completeness?.message}
+                    required
+                  />
                 </Grid>
-                {isOrderFieldVisible('receptionistNotes') && (
-                  <Grid item xs={12}>
-                    <FormField control={control} name="receptionistNotes" label={getOrderFieldLabel('receptionistNotes', 'Заметки приемщика')} multiline rows={2} />
-                  </Grid>
-                )}
-                {isOrderFieldVisible('estimatedPrice') && (
-                  <Grid item xs={12} md={6}>
-                    <NumberField control={control} name="estimatedPrice" label={getOrderFieldLabel('estimatedPrice', 'Ориентировочная стоимость')} />
-                  </Grid>
-                )}
-                {isOrderFieldVisible('recommendations') && (
-                  <Grid item xs={12} md={6}>
-                    <FormField control={control} name="recommendations" label={getOrderFieldLabel('recommendations', 'Рекомендации')} />
-                  </Grid>
-                )}
+                <Grid item xs={12}>
+                  <FormField control={control} name="receptionistNotes" label="Заметки приемщика" multiline rows={2} />
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <NumberField control={control} name="estimatedPrice" label="Ориентировочная стоимость" />
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <FormField control={control} name="recommendations" label="Рекомендации" />
+                </Grid>
               </Grid>
             </Paper>
 
@@ -371,7 +458,7 @@ const CreateOrderForm: React.FC<CreateOrderFormProps> = ({ open, onClose, onSubm
   );
 };
 
-const FormField: React.FC<any> = ({ control, name, error, ...props }) => (
+const FormField: React.FC<any> = ({ control, name, error, required, ...props }) => (
   <Controller
     name={name}
     control={control}
@@ -381,6 +468,7 @@ const FormField: React.FC<any> = ({ control, name, error, ...props }) => (
         {...props}
         fullWidth
         size="small"
+        required={required}
         error={!!error}
         helperText={error}
         value={field.value ?? ''}
@@ -389,34 +477,7 @@ const FormField: React.FC<any> = ({ control, name, error, ...props }) => (
   />
 );
 
-const ColorField: React.FC<any> = ({ control, name, label, error }) => (
-  <Controller
-    name={name}
-    control={control}
-    render={({ field }) => (
-      <Autocomplete
-        freeSolo
-        options={deviceColorOptions}
-        value={field.value ?? ''}
-        inputValue={field.value ?? ''}
-        onChange={(_, value) => field.onChange(value ?? '')}
-        onInputChange={(_, value) => field.onChange(value)}
-        renderInput={(params) => (
-          <TextField
-            {...params}
-            label={label}
-            fullWidth
-            size="small"
-            error={!!error}
-            helperText={error}
-          />
-        )}
-      />
-    )}
-  />
-);
-
-const NumberField: React.FC<any> = ({ control, name, label }) => (
+const NumberField: React.FC<any> = ({ control, name, label, required }) => (
   <Controller
     name={name}
     control={control}
@@ -426,6 +487,7 @@ const NumberField: React.FC<any> = ({ control, name, label }) => (
         fullWidth
         size="small"
         type="number"
+        required={required}
         value={field.value ?? ''}
         onChange={(event) => field.onChange(event.target.value ? Number(event.target.value) : undefined)}
       />

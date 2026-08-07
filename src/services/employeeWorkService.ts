@@ -34,6 +34,25 @@ const sortTasks = (items: EmployeeTask[]) =>
     return (a.dueDate || '9999-12-31').localeCompare(b.dueDate || '9999-12-31');
   });
 
+export const normalizeScheduleTime = (value?: string, fallback = '10:00') => {
+  const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})/);
+  if (!match) {
+    return fallback;
+  }
+
+  return `${Number(match[1]).toString().padStart(2, '0')}:${match[2]}`;
+};
+
+export const formatScheduleSlotLabel = (startTime?: string, endTime?: string) => {
+  const start = normalizeScheduleTime(startTime, '');
+  const end = normalizeScheduleTime(endTime, '');
+  if (!start || !end) {
+    return 'Смена';
+  }
+
+  return `${start}–${end}`;
+};
+
 class EmployeeWorkService {
   getSettings(): AppSettings {
     return appSettingsService.getSettings();
@@ -85,33 +104,69 @@ class EmployeeWorkService {
     return [...scheduleNotes, ...taskNotes];
   }
 
-  async saveScheduleEntry(entry: Partial<EmployeeScheduleEntry> & { employeeId: string }) {
-    const settings = await this.refresh();
+  async saveScheduleEntry(
+    entry: Partial<EmployeeScheduleEntry> & { employeeId: string },
+    options?: { dayOffForEmployeeIds?: string[] }
+  ) {
+    const settings = this.getSettings();
     const now = new Date().toISOString();
     const nextEntry: EmployeeScheduleEntry = {
       id: entry.id || generateId('schedule'),
       employeeId: entry.employeeId,
       date: entry.date || todayKey(),
-      startTime: entry.startTime || '10:00',
-      endTime: entry.endTime || '19:00',
+      startTime: normalizeScheduleTime(entry.startTime, settings.employees.defaultWorkStartTime || '10:00'),
+      endTime: normalizeScheduleTime(entry.endTime, settings.employees.defaultWorkEndTime || '19:00'),
       location: entry.location || '',
       note: entry.note || '',
       isDayOff: Boolean(entry.isDayOff),
       updatedAt: now,
     };
-    const schedules = settings.employeeWork.schedules.filter((item) => item.id !== nextEntry.id);
+    const schedules = settings.employeeWork.schedules.filter(
+      (item) =>
+        item.id !== nextEntry.id &&
+        !(item.employeeId === nextEntry.employeeId && item.date === nextEntry.date)
+    );
+    let withSavedEntry = sortSchedule([...schedules, nextEntry]);
+
+    const peerIds = !nextEntry.isDayOff
+      ? Array.from(
+          new Set(
+            (options?.dayOffForEmployeeIds || []).filter(
+              (employeeId) => employeeId && employeeId !== nextEntry.employeeId
+            )
+          )
+        )
+      : [];
+
+    if (peerIds.length > 0) {
+      const withoutPeersOnDate = withSavedEntry.filter(
+        (item) => !(peerIds.includes(item.employeeId) && item.date === nextEntry.date)
+      );
+      const peerDayOffs: EmployeeScheduleEntry[] = peerIds.map((employeeId) => ({
+        id: generateId('schedule'),
+        employeeId,
+        date: nextEntry.date,
+        startTime: nextEntry.startTime,
+        endTime: nextEntry.endTime,
+        location: nextEntry.location || '',
+        note: '',
+        isDayOff: true,
+        updatedAt: now,
+      }));
+      withSavedEntry = sortSchedule([...withoutPeersOnDate, ...peerDayOffs]);
+    }
 
     return appSettingsService.saveSettings({
       ...settings,
       employeeWork: {
         ...settings.employeeWork,
-        schedules: sortSchedule([...schedules, nextEntry]),
+        schedules: withSavedEntry,
       },
     });
   }
 
   async deleteScheduleEntry(id: string) {
-    const settings = await this.refresh();
+    const settings = this.getSettings();
     return appSettingsService.saveSettings({
       ...settings,
       employeeWork: {
@@ -122,8 +177,9 @@ class EmployeeWorkService {
   }
 
   async addScheduleRosterEmployee(employeeId: string, month: string) {
-    const settings = await this.refresh();
+    const settings = this.getSettings();
     const rosterEntries = settings.employeeWork.rosterEntries || [];
+    const rosterHiddenEntries = settings.employeeWork.rosterHiddenEntries || [];
     const existing = rosterEntries.find((entry) => entry.employeeId === employeeId && entry.month === month);
 
     if (existing) {
@@ -134,6 +190,9 @@ class EmployeeWorkService {
       ...settings,
       employeeWork: {
         ...settings.employeeWork,
+        rosterHiddenEntries: rosterHiddenEntries.filter(
+          (entry) => !(entry.employeeId === employeeId && entry.month === month)
+        ),
         rosterEntries: sortRoster([
           ...rosterEntries,
           {
@@ -147,8 +206,39 @@ class EmployeeWorkService {
     });
   }
 
+  async removeScheduleRosterEmployee(employeeId: string, month: string) {
+    const settings = this.getSettings();
+    const rosterEntries = settings.employeeWork.rosterEntries || [];
+    const rosterHiddenEntries = settings.employeeWork.rosterHiddenEntries || [];
+    const nextRosterEntries = rosterEntries.filter(
+      (entry) => !(entry.employeeId === employeeId && entry.month === month)
+    );
+    const alreadyHidden = rosterHiddenEntries.some(
+      (entry) => entry.employeeId === employeeId && entry.month === month
+    );
+
+    return appSettingsService.saveSettings({
+      ...settings,
+      employeeWork: {
+        ...settings.employeeWork,
+        rosterEntries: sortRoster(nextRosterEntries),
+        rosterHiddenEntries: alreadyHidden
+          ? rosterHiddenEntries
+          : sortRoster([
+              ...rosterHiddenEntries,
+              {
+                id: generateId('schedule_hidden'),
+                employeeId,
+                month,
+                updatedAt: new Date().toISOString(),
+              },
+            ]),
+      },
+    });
+  }
+
   async saveTask(task: Partial<EmployeeTask> & { employeeId: string; title: string }) {
-    const settings = await this.refresh();
+    const settings = this.getSettings();
     const now = new Date().toISOString();
     const status = task.status || 'todo';
     const nextTask: EmployeeTask = {
@@ -176,7 +266,7 @@ class EmployeeWorkService {
   }
 
   async updateTaskProgress(id: string, status: EmployeeTaskStatus, progress: number) {
-    const settings = await this.refresh();
+    const settings = this.getSettings();
     const now = new Date().toISOString();
     const tasks = settings.employeeWork.tasks.map((task) =>
       task.id === id
@@ -200,7 +290,7 @@ class EmployeeWorkService {
   }
 
   async deleteTask(id: string) {
-    const settings = await this.refresh();
+    const settings = this.getSettings();
     return appSettingsService.saveSettings({
       ...settings,
       employeeWork: {

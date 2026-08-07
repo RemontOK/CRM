@@ -1,5 +1,7 @@
 import React from 'react';
 import { Order, Client, Device } from '../../types';
+import { getOrderStatedProblem } from '../../utils/orderProblemText';
+import { getCompanyDisplayName } from '../../hooks/useCompanyName';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 
@@ -11,6 +13,7 @@ interface PrintDocumentsProps {
 }
 
 const PrintDocuments: React.FC<PrintDocumentsProps> = ({ order, client, device, onClose }) => {
+  const companyName = getCompanyDisplayName(appSettingsService.getSettings().business.companyName);
   // Проверяем валидность данных
   const validateData = () => {
     if (!order || !client || !device) {
@@ -22,16 +25,10 @@ const PrintDocuments: React.FC<PrintDocumentsProps> = ({ order, client, device, 
 
   const handlePrint = async () => {
     try {
-      console.log('Начинаем процесс печати через PDF...');
-
-      // Проверяем валидность данных
       if (!validateData()) {
-        console.error('Валидация данных не прошла');
         alert('Ошибка: отсутствуют данные для печати документа');
         return;
       }
-
-      console.log('Все проверки пройдены, создаем PDF для печати...');
 
       // Получаем элемент для конвертации
       const element = document.querySelector('.print-container') as HTMLElement;
@@ -115,7 +112,6 @@ const PrintDocuments: React.FC<PrintDocumentsProps> = ({ order, client, device, 
       // Ждем загрузки и автоматически печатаем
       setTimeout(() => {
         try {
-          console.log('PDF загружен, запускаем печать...');
           printWindow.print();
           
           // Закрываем окно после печати (с небольшой задержкой)
@@ -128,9 +124,7 @@ const PrintDocuments: React.FC<PrintDocumentsProps> = ({ order, client, device, 
           alert('Ошибка при печати PDF. Попробуйте использовать другой принтер.');
           printWindow.close();
         }
-      }, 1500); // Даем время PDF загрузиться
-
-      console.log('PDF создан и отправлен на печать');
+      }, 1500);
 
     } catch (error) {
       console.error('Общая ошибка при печати:', error);
@@ -352,7 +346,7 @@ const PrintDocuments: React.FC<PrintDocumentsProps> = ({ order, client, device, 
 
       <div className="print-container">
         <div style={{ textAlign: 'center', marginBottom: '20px', borderBottom: '2px solid #000', paddingBottom: '15px' }}>
-          <h1 style={{ fontSize: '20px', margin: '0 0 5px 0' }}>НЭК Сервис</h1>
+          <h1 style={{ fontSize: '20px', margin: '0 0 5px 0' }}>{companyName}</h1>
           <p style={{ fontSize: '12px', margin: '0 0 8px 0' }}>Сервисный центр по ремонту техники</p>
           <h2 style={{ fontSize: '16px', margin: '0 0 6px 0' }}>
                 {order.status === 'completed' ? 'АКТ ВЫПОЛНЕННЫХ РАБОТ' : 'АКТ ПРИЕМА-ПЕРЕДАЧИ УСТРОЙСТВА В РЕМОНТ'}
@@ -381,6 +375,7 @@ const PrintDocuments: React.FC<PrintDocumentsProps> = ({ order, client, device, 
               <p><strong>Тип:</strong> {device.type === 'phone' ? 'Телефон' : device.type === 'tablet' ? 'Планшет' : device.type === 'laptop' ? 'Ноутбук' : device.type === 'desktop' ? 'Компьютер' : 'Другое'}</p>
               <p><strong>Бренд и модель:</strong> {device.brand} {device.model}</p>
               <p><strong>Цвет:</strong> {device.color || 'Черный'}</p>
+              <p><strong>пароль:</strong> {device.password || '-'}</p>
               <p><strong>IMEI:</strong> {device.imei || '-'}</p>
               <p><strong>S/N:</strong> {device.serialNumber || '-'}</p>
               <p><strong>Состояние:</strong> {device.condition === 'excellent' ? 'Отличное' : device.condition === 'good' ? 'Хорошее' : device.condition === 'fair' ? 'Удовлетворительное' : 'Плохое'}</p>
@@ -394,7 +389,7 @@ const PrintDocuments: React.FC<PrintDocumentsProps> = ({ order, client, device, 
               {order.finalCost && <p><strong>Итоговая стоимость:</strong> ₽{order.finalCost.toLocaleString()}</p>}
               <p><strong>Аванс:</strong> ₽{order.payments.reduce((sum, p) => sum + p.amount, 0).toLocaleString()}</p>
               <p><strong>Ориентировочный срок:</strong> {order.estimatedDays ? `${order.estimatedDays} дней` : 'Не указан'}</p>
-              <p><strong>Заявленные неисправности:</strong> {order.description}</p>
+              <p><strong>Заявленные неисправности:</strong> {getOrderStatedProblem(order) || '—'}</p>
               {order.diagnosis && <p><strong>Диагностика:</strong> {order.diagnosis}</p>}
             </td>
           </tr>

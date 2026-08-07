@@ -1,10 +1,11 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert,
-  Avatar,
   Box,
   Button,
   Card,
+  CardActionArea,
   CardContent,
   Chip,
   Divider,
@@ -13,10 +14,10 @@ import {
   DialogContent,
   DialogTitle,
   FormControl,
+  FormControlLabel,
   Grid,
   IconButton,
   InputLabel,
-  List,
   ListItemButton,
   ListItemIcon,
   ListItemText,
@@ -25,6 +26,7 @@ import {
   Stack,
   Switch,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import {
@@ -34,80 +36,166 @@ import {
   Business,
   ContentCopy,
   CreditCard,
+  DarkMode,
   DeleteOutline,
   FileDownload,
   FileUpload,
-  FormatListBulleted,
-  Inventory,
-  HelpOutline,
+  FlashOn,
   Inventory2,
+  LightMode,
   LocationOn,
   Notifications,
-  Person,
-  People,
+  Palette,
   PointOfSale,
-  PostAdd,
   Preview,
   ReceiptLong,
   Refresh,
   Save,
-  Sms,
   Storefront,
   SupportAgent,
   TextFields,
   Workspaces,
 } from '@mui/icons-material';
 import toast from 'react-hot-toast';
-import { appSettingsService } from '../../services/appSettingsService';
+import { appSettingsService, migrateSmsRecordKeys, smsLegacyKeyMap } from '../../services/appSettingsService';
+import { getApiErrorMessage } from '../../services/api';
+import {
+  ENGLISH_TO_RUSSIAN_TOKEN_MAP,
+  applyTemplateTokenValues,
+  migrateEnglishTokens,
+} from '../../services/documentTemplateTokens';
+import {
+  DOCUMENT_CLIENT_DATA_TABLE_TOKEN,
+  DOCUMENT_WORKS_TABLE_TOKEN,
+  buildDocumentTemplateEditorInsertHtml,
+  decorateDocumentTemplateForEditor,
+  normalizeDocumentTemplateFromEditor,
+} from '../../services/documentTemplateEditor';
+import { buildSampleDocumentClientDataTableHtml } from '../../services/documentClientDataTable';
+import { buildSampleDocumentWorksTableHtml } from '../../services/documentWorksTable';
 import { taxonomyService } from '../../services/taxonomyService';
-import { AppSettings, DocumentTemplate, OrderStatusSetting } from '../../types';
+import { AppSettings, CrmAppearanceSettings, DocumentTemplate, OrderStatusSetting, SettingsSectionKey, TaxonomyNode } from '../../types';
+import {
+  APPEARANCE_PRESET_OPTIONS,
+  APPEARANCE_PRESETS,
+  DEFAULT_APPEARANCE,
+  buildCrmGradients,
+  normalizeAppearance,
+  previewCrmTheme,
+  resolveCrmAppearance,
+} from '../../utils/crmAppearance';
 import { heroCardSx, pageShellSx, panelCardSx } from '../../styles/ui';
 import TinyMceEditor from '../../components/TinyMceEditor/TinyMceEditor';
+import SmsProviderSetup from '../../components/SmsProviderSetup/SmsProviderSetup';
+import TelegramProviderSetup from '../../components/TelegramProviderSetup/TelegramProviderSetup';
+import SubscriptionPlanPicker from '../../components/SubscriptionPlanPicker/SubscriptionPlanPicker';
+import QuickSaleButtonsEditor from '../../components/QuickSaleButtonsManager/QuickSaleButtonsEditor';
+import { platformService } from '../../services/platformService';
+import { TIMEZONE_OPTIONS } from '../../constants/timezones';
+import { CURRENCY_OPTIONS } from '../../constants/currencies';
+import { isSystemNewOrderStatus } from '../../constants/orderStatuses';
+import { MAX_LOGO_BYTES, MAX_LOGO_LABEL } from '../../constants/logo';
+import { useAuth } from '../../hooks/useAuth';
+import { getSubscriptionSummary, formatDaysRemaining } from '../../utils/subscriptionSummary';
+import {
+  canAccessSettingsSection,
+  getEmployeeVisibleSettingsSections,
+  resolveSettingsSectionKey,
+} from '../../utils/employeeSettingsAccess';
+import { buildClientFieldPreviewValues, buildDocumentVariableGroups } from '../../utils/clientFieldUtils';
 
-const settingsSections = [
+const SETTINGS_STAT_CARD_HEIGHT = 132;
+
+const SettingsStatCard: React.FC<{
+  label: string;
+  value: string | number;
+  caption: string;
+  onClick?: () => void;
+  disabled?: boolean;
+}> = ({ label, value, caption, onClick, disabled }) => {
+  const content = (
+    <CardContent
+      sx={{
+        minHeight: SETTINGS_STAT_CARD_HEIGHT,
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        boxSizing: 'border-box',
+      }}
+    >
+      <Typography variant="body2" color="text.secondary" noWrap>
+        {label}
+      </Typography>
+      <Typography variant="h4" sx={{ mt: 1, mb: 'auto', fontWeight: 800, lineHeight: 1.1 }}>
+        {value}
+      </Typography>
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', pt: 1.5, lineHeight: 1.35 }}>
+        {caption}
+      </Typography>
+    </CardContent>
+  );
+
+  if (onClick) {
+    return (
+      <Card sx={{ ...panelCardSx, height: '100%' }}>
+        <CardActionArea onClick={onClick} disabled={disabled} sx={{ height: '100%', alignItems: 'stretch' }}>
+          {content}
+        </CardActionArea>
+      </Card>
+    );
+  }
+
+  return <Card sx={{ ...panelCardSx, height: '100%' }}>{content}</Card>;
+};
+
+type SettingsGroupItem = {
+  key: string;
+  label: string;
+  icon: React.ReactNode;
+  badge?: string;
+};
+
+type SettingsGroup = {
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+  items: SettingsGroupItem[];
+};
+
+const settingsSections: SettingsGroup[] = [
   {
-    title: 'Компания',
+    title: 'Компания и команда',
+    description: 'Профиль сервиса, филиалы, сотрудники и подписка',
+    icon: <Business />,
     items: [
-      { key: 'business', label: 'Общее', icon: <Business /> },
-      { key: 'locations', label: 'Локации', icon: <LocationOn /> },
-      { key: 'employees', label: 'Сотрудники', icon: <Workspaces /> },
-      { key: 'profile', label: 'Ваш профиль', icon: <Person /> },
-      { key: 'documents', label: 'Документы', icon: <Article /> },
-      { key: 'integrations', label: 'Интеграции', icon: <SupportAgent /> },
-      { key: 'license', label: 'Купить лицензию', icon: <Storefront /> },
+      { key: 'appearance', label: 'Цвета и тема', icon: <Palette fontSize="small" /> },
+      { key: 'business', label: 'Общее', icon: <Business fontSize="small" /> },
+      { key: 'locations', label: 'Локации', icon: <LocationOn fontSize="small" /> },
+      { key: 'employees', label: 'Сотрудники', icon: <Workspaces fontSize="small" /> },
+      { key: 'license', label: 'Подписка', icon: <Storefront fontSize="small" /> },
     ],
   },
   {
-    title: 'Заказы',
+    title: 'Заказы и документы',
+    description: 'Сценарии ремонта, статусы, шаблоны и поля клиента',
+    icon: <ReceiptLong />,
     items: [
-      { key: 'orders', label: 'Общее', icon: <ReceiptLong /> },
-      { key: 'statuses', label: 'Статусы', icon: <Inventory2 /> },
-      { key: 'quickSales', label: 'Быстрые продажи', icon: <Storefront /> },
+      { key: 'orders', label: 'Общее', icon: <ReceiptLong fontSize="small" /> },
+      { key: 'quickSales', label: 'Быстрые продажи', icon: <FlashOn fontSize="small" /> },
+      { key: 'statuses', label: 'Статусы', icon: <Inventory2 fontSize="small" /> },
+      { key: 'documents', label: 'Документы', icon: <Article fontSize="small" /> },
+      { key: 'clientFields', label: 'Поля клиента', icon: <TextFields fontSize="small" /> },
     ],
   },
   {
-    title: 'Уведомления',
+    title: 'Финансы и связь',
+    description: 'Оплата, касса, SMS, Telegram и уведомления',
+    icon: <PointOfSale />,
     items: [
-      { key: 'notifications', label: 'Ваши уведомления', icon: <Notifications />, badge: 'Новое' },
-      { key: 'email', label: 'E-mail клиентам', icon: <Notifications /> },
-      { key: 'sms', label: 'SMS клиентам', icon: <Sms /> },
-    ],
-  },
-  {
-    title: 'Платежи',
-    items: [
-      { key: 'paymentCategories', label: 'Статьи движения денежных средств', icon: <PointOfSale /> },
-      { key: 'paymentMethods', label: 'Методы оплаты', icon: <CreditCard /> },
-    ],
-  },
-  {
-    title: 'Формы',
-    items: [
-      { key: 'orderTypes', label: 'Типы заказа', icon: <PostAdd /> },
-      { key: 'orderFields', label: 'Поля заказа', icon: <FormatListBulleted /> },
-      { key: 'clientTypes', label: 'Типы клиента', icon: <People /> },
-      { key: 'clientFields', label: 'Поля клиента', icon: <TextFields /> },
-      { key: 'directories', label: 'Справочники', icon: <Inventory /> },
+      { key: 'paymentCategories', label: 'Статьи движения денежных средств', icon: <PointOfSale fontSize="small" /> },
+      { key: 'paymentMethods', label: 'Методы оплаты', icon: <CreditCard fontSize="small" /> },
+      { key: 'integrations', label: 'Интеграции и SMS', icon: <SupportAgent fontSize="small" /> },
+      { key: 'notifications', label: 'Уведомления', icon: <Notifications fontSize="small" /> },
     ],
   },
 ];
@@ -127,119 +215,203 @@ const documentTypeOptions: Array<{ value: DocumentTemplate['type']; label: strin
   { value: 'custom', label: 'Произвольный шаблон' },
 ];
 
-const documentVariableGroups = [
-  { title: 'Компания', variables: ['{{companyName}}', '{{companyPhone}}', '{{companyEmail}}', '{{companyAddress}}', '{{workingHours}}'] },
-  { title: 'Заказ', variables: ['{{documentTitle}}', '{{orderNumber}}', '{{orderStatus}}', '{{priority}}', '{{estimatedCost}}', '{{totalCost}}', '{{advancePayment}}'] },
-  { title: 'Клиент', variables: ['{{clientName}}', '{{clientPhone}}', '{{clientEmail}}', '{{clientAddress}}'] },
-  { title: 'Устройство', variables: ['{{device}}', '{{deviceBrand}}', '{{deviceModel}}', '{{color}}', '{{serialNumber}}', '{{imei}}', '{{password}}', '{{completeness}}', '{{appearance}}'] },
-  { title: 'Финансы', variables: ['{{works}}', '{{parts}}', '{{discount}}', '{{paymentMethod}}', '{{debt}}', '{{warrantyText}}', '{{footerDisclaimer}}'] },
-  { title: 'Сотрудники', variables: ['{{technician}}', '{{intakeManager}}', '{{deliveryManager}}'] },
-  { title: 'Дата', variables: ['{{date}}', '{{createdAt}}', '{{completedAt}}'] },
-  { title: 'Дополнительно', variables: ['{{problemDescription}}', '{{diagnosis}}', '{{notes}}', '{{recommendations}}'] },
-];
+const migrateDocumentTemplatesTokens = (settings: AppSettings): AppSettings => {
+  const migratedTemplates = settings.documents.templates.map((template) => {
+    const newTemplateContent = migrateEnglishTokens(template.template);
+    const newVariables = template.variables.map((v) => {
+      const mapped = ENGLISH_TO_RUSSIAN_TOKEN_MAP[v];
+      return mapped || v;
+    });
+    if (newTemplateContent === template.template && newVariables.every((v, i) => v === template.variables[i])) {
+      return template;
+    }
+    return {
+      ...template,
+      template: newTemplateContent,
+      variables: newVariables,
+      updatedAt: new Date(),
+    };
+  });
+  if (migratedTemplates.every((t, i) => t === settings.documents.templates[i])) {
+    return settings;
+  }
+  return {
+    ...settings,
+    documents: {
+      ...settings.documents,
+      templates: migratedTemplates,
+    },
+  };
+};
 
 const smsVariableGroups: Array<{ title: string; variables: Array<{ token: string; label: string }> }> = [
   {
     title: 'Клиент',
     variables: [
-      { token: '{{clientName}}', label: 'Имя клиента' },
+      { token: '{{ФИОКлиента}}', label: 'Имя клиента' },
       { token: '{{phone}}', label: 'Телефон' },
-      { token: '{{clientPhone}}', label: 'Телефон клиента (альт.)' },
+      { token: '{{ТелефонКлиента}}', label: 'Телефон клиента (альт.)' },
     ],
   },
   {
     title: 'Заказ',
     variables: [
-      { token: '{{orderNumber}}', label: 'Номер заказа' },
+      { token: '{{НомерЗаказа}}', label: 'Номер заказа' },
       { token: '{{status}}', label: 'Статус заказа' },
-      { token: '{{device}}', label: 'Устройство' },
+      { token: '{{Устройство}}', label: 'Устройство' },
     ],
   },
   {
     title: 'Финансы',
     variables: [
-      { token: '{{debt}}', label: 'Остаток к оплате' },
+      { token: '{{Долг}}', label: 'Остаток к оплате' },
       { token: '{{amount}}', label: 'Сумма платежа' },
-      { token: '{{totalCost}}', label: 'Итоговая стоимость' },
+      { token: '{{ИтоговаяСтоимость}}', label: 'Итоговая стоимость' },
     ],
   },
   {
     title: 'Компания',
     variables: [
-      { token: '{{companyName}}', label: 'Название компании' },
-      { token: '{{companyPhone}}', label: 'Телефон компании' },
-      { token: '{{companyAddress}}', label: 'Адрес компании' },
+      { token: '{{НазваниеКомпании}}', label: 'Название компании' },
+      { token: '{{ТелефонКомпании}}', label: 'Телефон компании' },
+      { token: '{{АдресКомпании}}', label: 'Адрес компании' },
+    ],
+  },
+  {
+    title: 'Telegram',
+    variables: [
+      { token: '{{telegramBotLink}}', label: 'Ссылка на бота' },
+      { token: '{{telegramStartParam}}', label: 'Параметр start (link_…)' },
     ],
   },
 ];
 
-type SettingsSectionKey =
-  | 'business'
-  | 'locations'
-  | 'employees'
-  | 'profile'
-  | 'documents'
-  | 'integrations'
-  | 'license'
-  | 'orders'
-  | 'statuses'
-  | 'quickSales'
-  | 'notifications'
-  | 'email'
-  | 'sms'
-  | 'paymentCategories'
-  | 'paymentMethods'
-  | 'orderTypes'
-  | 'orderFields'
-  | 'clientTypes'
-  | 'clientFields'
-  | 'directories';
+const variableChipSx = {
+  cursor: 'pointer',
+  height: 'auto',
+  borderRadius: 1.5,
+  bgcolor: 'background.paper',
+  borderColor: 'var(--crm-border)',
+  transition: 'background-color 0.15s ease, border-color 0.15s ease',
+  '& .MuiChip-label': {
+    whiteSpace: 'normal',
+    py: 0.5,
+    lineHeight: 1.3,
+    color: 'var(--crm-color-ink)',
+  },
+  '&:hover': {
+    bgcolor: 'var(--crm-color-primary)',
+    borderColor: 'var(--crm-color-primary-dark)',
+    '& .MuiChip-label': {
+      color: '#ffffff',
+    },
+  },
+} as const;
 
 const Settings: React.FC = () => {
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { user, refreshUser } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [activeSection, setActiveSection] = useState<SettingsSectionKey>('business');
   const [isSectionDialogOpen, setIsSectionDialogOpen] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(appSettingsService.getSettings());
   const [newLocation, setNewLocation] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
-  const [newFormItems, setNewFormItems] = useState<Record<'orderTypes' | 'orderFields' | 'clientTypes' | 'clientFields' | 'directories', string>>({
-    orderTypes: '',
-    orderFields: '',
-    clientTypes: '',
+  const [newFormItems, setNewFormItems] = useState<Record<'clientFields', string>>({
     clientFields: '',
-    directories: '',
   });
   const tinyEditorRef = useRef<any>(null);
-  const smsEditorRef = useRef<any>(null);
+  const documentTemplateDraftRef = useRef<Record<string, string>>({});
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const documentPreviewDebounceRef = useRef<number | null>(null);
+  const [documentPreviewTemplate, setDocumentPreviewTemplate] = useState('');
+  const [documentEditorRevision, setDocumentEditorRevision] = useState(0);
+  const handleDocumentEditorReady = useCallback((editor: any | null) => {
+    tinyEditorRef.current = editor;
+  }, []);
+  const smsTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
-  const profileAvatarInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedSmsStatusTemplate, setSelectedSmsStatusTemplate] = useState('ready');
-  const [newPaymentMethod, setNewPaymentMethod] = useState({
-    code: '',
-    label: '',
-    registerType: 'cashbox' as 'cashbox' | 'bank_terminal' | 'online' | 'mixed',
-  });
-  const [newQuickSale, setNewQuickSale] = useState({
-    label: '',
-    category: '',
-    saleMode: 'quantity' as 'single' | 'quantity',
-  });
+  const [newPaymentMethodLabel, setNewPaymentMethodLabel] = useState('');
   const [newStatusName, setNewStatusName] = useState('');
   const [inventoryCategoryOptions, setInventoryCategoryOptions] = useState<string[]>([]);
+  const [cashCategories, setCashCategories] = useState<TaxonomyNode[]>([]);
+  const [newCashCategory, setNewCashCategory] = useState('');
+  const [editingCashCategoryId, setEditingCashCategoryId] = useState<string | null>(null);
+  const [editingCashCategoryName, setEditingCashCategoryName] = useState('');
+  const [billingEnabled, setBillingEnabled] = useState(false);
+  const [billingLoading, setBillingLoading] = useState(true);
+  const [monthlyPrice, setMonthlyPrice] = useState(2290);
+  const [locationSlots, setLocationSlots] = useState(1);
+  const [isLocationPaymentOpen, setIsLocationPaymentOpen] = useState(false);
+  const [pendingLocationName, setPendingLocationName] = useState('');
 
-  const handleProfileAvatarChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) {
+  useEffect(() => {
+    const storedPending = localStorage.getItem('crm_pending_location_name')?.trim();
+    if (storedPending) {
+      setPendingLocationName(storedPending);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshUser();
+  }, [refreshUser]);
+
+  useEffect(() => {
+    void platformService
+      .getBillingConfig()
+      .then((config) => {
+        setBillingEnabled(Boolean(config.enabled));
+        setMonthlyPrice(Number(config.monthlyPrice || config.amount) || 2290);
+        setLocationSlots(Math.max(1, Number(config.locationSlots || config.tenant?.locationSlots) || 1));
+      })
+      .catch(() => {
+        setBillingEnabled(false);
+      })
+      .finally(() => setBillingLoading(false));
+  }, []);
+
+  const visibleSettingsGroups = useMemo(
+    () =>
+      settingsSections
+        .map((group) => ({
+          ...group,
+          items: group.items.filter((item) => canAccessSettingsSection(user, item.key as SettingsSectionKey)),
+        }))
+        .filter((group) => group.items.length > 0),
+    [user]
+  );
+
+  const allowedSettingsSections = useMemo(() => getEmployeeVisibleSettingsSections(user), [user]);
+
+  useEffect(() => {
+    if (!allowedSettingsSections.length) {
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      setCategoryValue('profile', 'avatar', String(reader.result || ''));
-    };
-    reader.readAsDataURL(file);
-    event.target.value = '';
-  };
+    if (!canAccessSettingsSection(user, activeSection)) {
+      const preferred =
+        user?.role !== 'admin' && allowedSettingsSections.includes('documents')
+          ? 'documents'
+          : allowedSettingsSections[0];
+      setActiveSection(preferred);
+    }
+  }, [activeSection, allowedSettingsSections, user]);
+
+  useEffect(() => {
+    const requestedSection = searchParams.get('section') as SettingsSectionKey | null;
+    if (!requestedSection || !canAccessSettingsSection(user, requestedSection)) {
+      return;
+    }
+
+    const nextSection = resolveSettingsSectionKey(requestedSection);
+    setActiveSection(nextSection);
+    setIsSectionDialogOpen(true);
+    setSearchParams({}, { replace: true });
+  }, [searchParams, setSearchParams, user]);
 
   useEffect(() => {
     const load = async () => {
@@ -247,7 +419,16 @@ const Settings: React.FC = () => {
         appSettingsService.refreshFromApi(),
         taxonomyService.refreshFromApi(),
       ]);
-      setSettings(nextSettings);
+      const migratedSettings = migrateDocumentTemplatesTokens(nextSettings);
+      setSettings(migratedSettings);
+      previewCrmTheme(migratedSettings);
+      if (migratedSettings !== nextSettings && isAdmin) {
+        try {
+          await appSettingsService.saveSettings(migratedSettings);
+        } catch {
+          // Token migration stays in local cache even if server sync fails.
+        }
+      }
       setInventoryCategoryOptions(
         taxonomyService
           .getNodes('inventory')
@@ -255,13 +436,26 @@ const Settings: React.FC = () => {
           .filter(Boolean)
           .sort((a, b) => a.localeCompare(b, 'ru'))
       );
-      if (nextSettings.documents.templates.length > 0) {
-        setSelectedTemplateId(nextSettings.documents.templates[0].id);
+      setCashCategories(
+        taxonomyService
+          .getNodes('cash')
+          .filter((node) => !node.parentId)
+          .sort((a, b) => a.name.localeCompare(b.name, 'ru'))
+      );
+      if (migratedSettings.documents.templates.length > 0) {
+        setSelectedTemplateId(migratedSettings.documents.templates[0].id);
       }
     };
 
     void load();
   }, []);
+
+  useEffect(
+    () => () => {
+      previewCrmTheme(appSettingsService.getSettings());
+    },
+    []
+  );
 
   useEffect(() => {
     if (!selectedTemplateId && settings.documents.templates.length > 0) {
@@ -277,6 +471,71 @@ const Settings: React.FC = () => {
         [key]: value,
       },
     }));
+  };
+
+  const appearancePreview = useMemo(() => {
+    const appearance = normalizeAppearance(settings.appearance);
+    const colors = resolveCrmAppearance(appearance);
+    const gradients = buildCrmGradients(colors);
+    return { appearance, colors, gradients };
+  }, [settings.appearance]);
+
+  const applyLiveAppearance = (nextSettings: AppSettings) => {
+    previewCrmTheme(nextSettings);
+    appSettingsService.cacheSettingsLocally(nextSettings);
+  };
+
+  const applyAppearancePreset = (presetId: string) => {
+    if (!APPEARANCE_PRESETS[presetId]) {
+      return;
+    }
+
+    setSettings((prev) => {
+      const next = {
+        ...prev,
+        appearance: normalizeAppearance({
+          preset: presetId,
+          mode: prev.appearance.mode,
+        }),
+      };
+      applyLiveAppearance(next);
+      return next;
+    });
+  };
+
+  const setAppearanceValue = <K extends keyof CrmAppearanceSettings>(key: K, value: CrmAppearanceSettings[K]) => {
+    setSettings((prev) => {
+      const next = {
+        ...prev,
+        appearance: normalizeAppearance({
+          ...prev.appearance,
+          ...(key !== 'mode' ? { preset: 'custom' } : {}),
+          [key]: value,
+        }),
+        system: {
+          ...prev.system,
+          theme: key === 'mode' ? (value as AppSettings['system']['theme']) : prev.system.theme,
+        },
+      };
+      applyLiveAppearance(next);
+      return next;
+    });
+  };
+
+  const handleResetAppearance = () => {
+    setSettings((prev) => {
+      const next = {
+        ...prev,
+        appearance: structuredClone(DEFAULT_APPEARANCE),
+        system: {
+          ...prev.system,
+          theme: DEFAULT_APPEARANCE.mode,
+        },
+      };
+      applyLiveAppearance(next);
+      return next;
+    });
+    toast.success('Цвета и тема сброшены к значениям по умолчанию');
   };
 
   const setNestedCategoryValue = <T extends keyof AppSettings, K extends keyof AppSettings[T]>(
@@ -295,6 +554,32 @@ const Settings: React.FC = () => {
         },
       },
     }));
+  };
+
+  const handleSmsTriggerChange = (statusCode: string, enabled: boolean) => {
+    setSettings((prev) => {
+      const nextSettings: AppSettings = {
+        ...prev,
+        notifications: {
+          ...prev.notifications,
+          smsNotifications: enabled ? true : prev.notifications.smsNotifications,
+          smsStatusTriggers: {
+            ...prev.notifications.smsStatusTriggers,
+            [statusCode]: enabled,
+          },
+        },
+      };
+
+      void appSettingsService
+        .saveSettings(nextSettings)
+        .then((saved) => {
+          setSettings(saved);
+          toast.success(enabled ? `SMS для статуса включена и сохранена` : 'SMS-триггер сохранен');
+        })
+        .catch(() => toast.error('Не удалось сохранить SMS-триггер на сервере'));
+
+      return nextSettings;
+    });
   };
 
   const updateTemplate = (templateId: string, updater: (template: DocumentTemplate) => DocumentTemplate) => {
@@ -326,10 +611,53 @@ const Settings: React.FC = () => {
     }));
   };
 
-  const enabledNotificationCount = useMemo(
-    () => Object.values(settings.notifications).filter(Boolean).length,
-    [settings.notifications]
+  const enabledNotificationCount = useMemo(() => {
+    const triggerCount = Object.values(settings.notifications.smsStatusTriggers || {}).filter(Boolean).length;
+    return (settings.notifications.smsNotifications ? 1 : 0) + triggerCount;
+  }, [settings.notifications]);
+
+  const totalNotificationCount = useMemo(
+    () => 1 + Object.keys(settings.notifications.smsStatusTriggers || {}).length,
+    [settings.notifications.smsStatusTriggers]
   );
+
+  const paymentMethodsCount = useMemo(
+    () => settings.payment.paymentMethods.length + (settings.payment.installmentEnabled ? 1 : 0),
+    [settings.payment.installmentEnabled, settings.payment.paymentMethods.length]
+  );
+
+  const locationsCount = settings.locations.items.length;
+  const canAddMoreLocations = locationsCount < locationSlots;
+  const locationLimitReached = billingEnabled && !canAddMoreLocations;
+
+  const accessibleSettingsCount = useMemo(
+    () => visibleSettingsGroups.flatMap((group) => group.items).length,
+    [visibleSettingsGroups]
+  );
+
+  const subscriptionSummary = useMemo(
+    () => getSubscriptionSummary(user?.tenant, settings.license.plan),
+    [settings.license.plan, user?.tenant]
+  );
+
+  const handleOpenSubscription = () => {
+    if (canAccessSettingsSection(user, 'license')) {
+      setActiveSection('license');
+      setIsSectionDialogOpen(true);
+      return;
+    }
+    navigate('/subscribe');
+  };
+
+  const subscriptionStatValue =
+    subscriptionSummary.daysRemaining != null ? subscriptionSummary.daysRemaining : '—';
+
+  const subscriptionStatCaption = [
+    subscriptionSummary.planName,
+    subscriptionSummary.endsAtLabel ? `до ${subscriptionSummary.endsAtLabel}` : subscriptionSummary.title,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   const orderStatusOptions = useMemo(
     () => [...settings.orders.statuses].sort((a, b) => a.sortOrder - b.sortOrder),
@@ -344,6 +672,147 @@ const Settings: React.FC = () => {
   const selectedTemplate = useMemo(
     () => settings.documents.templates.find((template) => template.id === selectedTemplateId) || null,
     [selectedTemplateId, settings.documents.templates]
+  );
+
+  const documentTableVariant = selectedTemplate?.type === 'completion' ? 'completion' : 'acceptance';
+
+  const persistCurrentDocumentEditorDraft = useCallback(() => {
+    if (!selectedTemplateId || !tinyEditorRef.current) {
+      return;
+    }
+
+    try {
+      tinyEditorRef.current.save?.();
+    } catch {
+      // TinyMCE may not expose save in some builds.
+    }
+
+    documentTemplateDraftRef.current[selectedTemplateId] = normalizeDocumentTemplateFromEditor(
+      tinyEditorRef.current.getContent(),
+      documentTableVariant
+    );
+  }, [documentTableVariant, selectedTemplateId]);
+
+  const handleSelectDocumentTemplate = useCallback(
+    (templateId: string) => {
+      if (templateId === selectedTemplateId) {
+        return;
+      }
+      persistCurrentDocumentEditorDraft();
+      setSelectedTemplateId(templateId);
+    },
+    [persistCurrentDocumentEditorDraft, selectedTemplateId]
+  );
+
+  const handleDocumentEditorChange = useCallback(
+    (nextValue: string) => {
+      if (!selectedTemplateId) {
+        return;
+      }
+      const normalized = normalizeDocumentTemplateFromEditor(nextValue, documentTableVariant);
+      documentTemplateDraftRef.current[selectedTemplateId] = normalized;
+      if (documentPreviewDebounceRef.current) {
+        window.clearTimeout(documentPreviewDebounceRef.current);
+      }
+      documentPreviewDebounceRef.current = window.setTimeout(() => {
+        setDocumentPreviewTemplate(normalized);
+      }, 300);
+    },
+    [documentTableVariant, selectedTemplateId]
+  );
+
+  useEffect(() => {
+    if (!selectedTemplate) {
+      setDocumentPreviewTemplate('');
+      return;
+    }
+    const draft = documentTemplateDraftRef.current[selectedTemplate.id];
+    setDocumentPreviewTemplate(draft ?? selectedTemplate.template);
+  }, [selectedTemplate]);
+
+  useEffect(
+    () => () => {
+      if (documentPreviewDebounceRef.current) {
+        window.clearTimeout(documentPreviewDebounceRef.current);
+      }
+    },
+    []
+  );
+
+  const renderSectionIntro = (text: string) => (
+    <Box
+      sx={{
+        px: 2,
+        py: 1.25,
+        borderRadius: 2,
+        bgcolor: 'rgba(37, 99, 235, 0.06)',
+        border: `1px solid ${'var(--crm-border)'}`,
+      }}
+    >
+      <Typography variant="body2" color="text.secondary">
+        {text}
+      </Typography>
+    </Box>
+  );
+
+  const renderAppearanceThemePanel = () => (
+    <Box
+      sx={{
+        px: 2,
+        py: 1.75,
+        borderRadius: 2,
+        bgcolor: 'rgba(37, 99, 235, 0.06)',
+        border: `1px solid ${'var(--crm-border)'}`,
+      }}
+    >
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1.75 }}>
+        Настройте фирменные цвета CRM: акцент, боковое меню, фон страниц и режим отображения. Тема единая для всей компании — все сотрудники видят интерфейс так же, как администратор, после сохранения.
+      </Typography>
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 2,
+          flexWrap: 'wrap',
+          px: 1.5,
+          py: 1.25,
+          borderRadius: 1.5,
+          bgcolor: 'background.paper',
+          border: `1px solid ${'var(--crm-border)'}`,
+        }}
+      >
+        <Typography variant="body2" fontWeight={700}>
+          Режим темы
+        </Typography>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <LightMode
+            fontSize="small"
+            sx={{ color: settings.appearance.mode === 'light' ? 'primary.main' : 'text.disabled' }}
+          />
+          <FormControlLabel
+            sx={{ m: 0 }}
+            control={
+              <Switch
+                checked={settings.appearance.mode === 'dark'}
+                onChange={(event) => setAppearanceValue('mode', event.target.checked ? 'dark' : 'light')}
+                inputProps={{ 'aria-label': 'Тёмная тема' }}
+              />
+            }
+            label={
+              <Typography variant="body2" fontWeight={600}>
+                {settings.appearance.mode === 'dark' ? 'Тёмная' : 'Светлая'}
+              </Typography>
+            }
+            labelPlacement="end"
+          />
+          <DarkMode
+            fontSize="small"
+            sx={{ color: settings.appearance.mode === 'dark' ? 'primary.main' : 'text.disabled' }}
+          />
+        </Stack>
+      </Box>
+    </Box>
   );
 
   const documentCategories = useMemo(() => {
@@ -372,9 +841,21 @@ const Settings: React.FC = () => {
   }, [selectedSmsStatusTemplate, smsStatusOptions]);
 
   useEffect(() => {
+    if (activeSection === 'profile') {
+      navigate('/my-profile');
+      return;
+    }
+    if (activeSection === 'email') {
+      setActiveSection('notifications');
+    } else if (activeSection === 'sms') {
+      setActiveSection('integrations');
+    }
+  }, [activeSection, navigate]);
+
+  useEffect(() => {
     setSettings((prev) => {
-      const nextTriggers = { ...prev.notifications.smsStatusTriggers };
-      const nextTemplates = { ...prev.integrations.smsStatusTemplates };
+      const nextTriggers = migrateSmsRecordKeys({ ...prev.notifications.smsStatusTriggers });
+      const nextTemplates = migrateSmsRecordKeys({ ...prev.integrations.smsStatusTemplates });
       let hasChanges = false;
 
       orderStatusOptions.forEach((status) => {
@@ -389,6 +870,9 @@ const Settings: React.FC = () => {
       });
 
       Object.keys(nextTriggers).forEach((key) => {
+        if (smsLegacyKeyMap[key]) {
+          return;
+        }
         if (!orderStatusOptions.some((status) => status.code === key)) {
           delete nextTriggers[key];
           hasChanges = true;
@@ -396,13 +880,21 @@ const Settings: React.FC = () => {
       });
 
       Object.keys(nextTemplates).forEach((key) => {
+        if (smsLegacyKeyMap[key]) {
+          return;
+        }
         if (!orderStatusOptions.some((status) => status.code === key)) {
           delete nextTemplates[key];
           hasChanges = true;
         }
       });
 
-      if (!hasChanges) {
+      const triggersChanged =
+        JSON.stringify(prev.notifications.smsStatusTriggers) !== JSON.stringify(nextTriggers);
+      const templatesChanged =
+        JSON.stringify(prev.integrations.smsStatusTemplates) !== JSON.stringify(nextTemplates);
+
+      if (!hasChanges && !triggersChanged && !templatesChanged) {
         return prev;
       }
 
@@ -420,43 +912,217 @@ const Settings: React.FC = () => {
     });
   }, [orderStatusOptions]);
 
+  const syncTemplateEditorContent = (): AppSettings => {
+    persistCurrentDocumentEditorDraft();
+
+    const baseSettings = settingsRef.current;
+    const dirtyTemplateIds = new Set<string>([
+      ...Object.keys(documentTemplateDraftRef.current),
+      ...(selectedTemplateId ? [selectedTemplateId] : []),
+    ]);
+
+    let nextSettings = baseSettings;
+    for (const templateId of dirtyTemplateIds) {
+      const draftHtml = documentTemplateDraftRef.current[templateId];
+      if (!draftHtml) {
+        continue;
+      }
+
+      const currentTemplate = nextSettings.documents.templates.find((template) => template.id === templateId);
+      if (!currentTemplate) {
+        continue;
+      }
+
+      nextSettings = {
+        ...nextSettings,
+        documents: {
+          ...nextSettings.documents,
+          templates: nextSettings.documents.templates.map((template) =>
+            template.id === templateId ? { ...template, template: draftHtml, updatedAt: new Date() } : template
+          ),
+        },
+      };
+    }
+
+    return nextSettings;
+  };
+
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      const saved = await appSettingsService.saveSettings(settings);
+      const settingsToSave = syncTemplateEditorContent();
+      setSettings(settingsToSave);
+      const saved = await appSettingsService.saveSettings(settingsToSave);
       setSettings(saved);
-      toast.success('????????? ?????????');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleReset = async () => {
-    setIsSaving(true);
-    try {
-      const defaults = await appSettingsService.resetSettings();
-      setSettings(defaults);
-      setNewLocation('');
-      setSelectedTemplateId(defaults.documents.templates[0]?.id || '');
-      toast.success('????????? ????????');
+      saved.documents.templates.forEach((template) => {
+        documentTemplateDraftRef.current[template.id] = template.template;
+      });
+      if (selectedTemplateId) {
+        setDocumentPreviewTemplate(documentTemplateDraftRef.current[selectedTemplateId] ?? '');
+      }
+      previewCrmTheme(saved);
+      toast.success('Настройки сохранены');
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, 'Не удалось сохранить настройки на сервере'));
     } finally {
       setIsSaving(false);
     }
   };
 
   const handleAddLocation = () => {
-    if (!newLocation.trim()) {
+    const value = newLocation.trim();
+    if (!value) {
       toast.error('Введите название локации');
+      return;
+    }
+
+    if (settings.locations.items.includes(value)) {
+      toast.error('Такая локация уже есть');
+      return;
+    }
+
+    if (locationLimitReached) {
+      setPendingLocationName(value);
+      localStorage.setItem('crm_pending_location_name', value);
+      setIsLocationPaymentOpen(true);
       return;
     }
 
     setSettings((prev) => ({
       ...prev,
       locations: {
-        items: Array.from(new Set([...prev.locations.items, newLocation.trim()])),
+        items: Array.from(new Set([...prev.locations.items, value])),
       },
     }));
     setNewLocation('');
+  };
+
+  const applyPendingLocationIfAllowed = useCallback(
+    (slots: number) => {
+      const pending = pendingLocationName.trim();
+      if (!pending) {
+        return;
+      }
+
+      setSettings((prev) => {
+        if (prev.locations.items.length >= slots || prev.locations.items.includes(pending)) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          locations: {
+            items: [...prev.locations.items, pending],
+          },
+        };
+      });
+      setPendingLocationName('');
+      setNewLocation('');
+      localStorage.removeItem('crm_pending_location_name');
+      toast.success(`Локация «${pending}» добавлена`);
+    },
+    [pendingLocationName]
+  );
+
+  useEffect(() => {
+    if (searchParams.get('paid') !== 'location') {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const pollLocationPayment = async () => {
+      try {
+        const config = await platformService.getBillingConfig();
+        if (cancelled) {
+          return;
+        }
+
+        const slots = Math.max(1, Number(config.locationSlots || config.tenant?.locationSlots) || 1);
+        setLocationSlots(slots);
+        if (config.tenant) {
+          void refreshUser();
+        }
+
+        if (slots > settingsRef.current.locations.items.length) {
+          applyPendingLocationIfAllowed(slots);
+          setIsLocationPaymentOpen(false);
+          setSearchParams((params) => {
+            params.delete('paid');
+            return params;
+          }, { replace: true });
+        }
+      } catch {
+        // keep polling
+      }
+    };
+
+    void pollLocationPayment();
+    const timer = window.setInterval(() => {
+      void pollLocationPayment();
+    }, 4000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [searchParams, setSearchParams, refreshUser, applyPendingLocationIfAllowed]);
+
+  const refreshCashCategories = () => {
+    setCashCategories(
+      taxonomyService
+        .getNodes('cash')
+        .filter((node) => !node.parentId)
+        .sort((a, b) => a.name.localeCompare(b.name, 'ru'))
+    );
+  };
+
+  const handleAddCashCategory = async () => {
+    const name = newCashCategory.trim();
+    if (!name) {
+      toast.error('Введите название статьи');
+      return;
+    }
+
+    try {
+      await taxonomyService.addNode('cash', name);
+      await taxonomyService.refreshFromApi();
+      refreshCashCategories();
+      setNewCashCategory('');
+      toast.success('Статья добавлена');
+    } catch {
+      toast.error('Не удалось добавить статью');
+    }
+  };
+
+  const handleSaveCashCategory = async (nodeId: string) => {
+    const name = editingCashCategoryName.trim();
+    if (!name) {
+      toast.error('Введите название статьи');
+      return;
+    }
+
+    try {
+      await taxonomyService.updateNode(nodeId, name);
+      await taxonomyService.refreshFromApi();
+      refreshCashCategories();
+      setEditingCashCategoryId(null);
+      setEditingCashCategoryName('');
+      toast.success('Статья обновлена');
+    } catch {
+      toast.error('Не удалось сохранить статью');
+    }
+  };
+
+  const handleRemoveCashCategory = async (nodeId: string) => {
+    try {
+      await taxonomyService.deleteNode(nodeId);
+      await taxonomyService.refreshFromApi();
+      refreshCashCategories();
+      toast.success('Статья удалена');
+    } catch {
+      toast.error('Не удалось удалить статью');
+    }
   };
 
   const handleRemoveLocation = (location: string) => {
@@ -481,7 +1147,7 @@ const Settings: React.FC = () => {
     }));
   };
 
-  const handleAddFormItem = (listKey: 'orderTypes' | 'orderFields' | 'clientTypes' | 'clientFields' | 'directories') => {
+  const handleAddFormItem = (listKey: 'clientFields') => {
     const label = newFormItems[listKey].trim();
     if (!label) {
       toast.error('Введите название');
@@ -504,7 +1170,7 @@ const Settings: React.FC = () => {
         sortOrder,
       };
 
-      if (listKey === 'orderFields' || listKey === 'clientFields') {
+      if (listKey === 'clientFields') {
         return [...(items as any[]), { ...base, required: false }] as AppSettings['forms'][typeof listKey];
       }
 
@@ -524,13 +1190,13 @@ const Settings: React.FC = () => {
 
   const createEmptyTemplate = (): DocumentTemplate => ({
     id: `tpl_custom_${Date.now()}`,
-    name: '????? ????????',
+    name: 'Новый шаблон',
     type: 'custom',
     category: 'other',
-    description: '???????????????? ??????.',
+    description: 'Произвольный шаблон.',
     template:
-      '<h1>{{documentTitle}}</h1><p><strong>????? ??????:</strong> {{orderNumber}}</p><p><strong>??????:</strong> {{clientName}}</p><p><strong>????:</strong> {{date}}</p>',
-    variables: ['{{documentTitle}}', '{{orderNumber}}', '{{clientName}}', '{{date}}'],
+      '<h1>{{НазваниеДокумента}}</h1><p><strong>Номер заказа:</strong> {{НомерЗаказа}}</p><p><strong>Клиент:</strong> {{ФИОКлиента}}</p><p><strong>Дата:</strong> {{Дата}}</p>',
+    variables: ['{{НазваниеДокумента}}', '{{НомерЗаказа}}', '{{ФИОКлиента}}', '{{Дата}}'],
     isActive: true,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -546,7 +1212,7 @@ const Settings: React.FC = () => {
       },
     }));
     setSelectedTemplateId(nextTemplate.id);
-    toast.success('????? ???????? ????????');
+    toast.success('Новый шаблон создан');
   };
 
   const handleDeleteTemplate = (templateId: string) => {
@@ -563,7 +1229,7 @@ const Settings: React.FC = () => {
       setSelectedTemplateId(nextId);
     }
 
-    toast.success('?????? ??????');
+    toast.success('Шаблон удалён');
   };
 
   const handleInsertVariable = (token: string) => {
@@ -571,15 +1237,30 @@ const Settings: React.FC = () => {
       return;
     }
 
+    const insertContent = buildDocumentTemplateEditorInsertHtml(
+      token,
+      selectedTemplate.type === 'completion' ? 'completion' : 'acceptance'
+    );
+
     if (tinyEditorRef.current) {
       tinyEditorRef.current.focus();
-      tinyEditorRef.current.insertContent(token);
-      const nextValue = tinyEditorRef.current.getContent();
+      tinyEditorRef.current.insertContent(insertContent);
+      const nextValue = normalizeDocumentTemplateFromEditor(
+        tinyEditorRef.current.getContent(),
+        selectedTemplate.type === 'completion' ? 'completion' : 'acceptance'
+      );
+      documentTemplateDraftRef.current[selectedTemplate.id] = nextValue;
+      setDocumentPreviewTemplate(nextValue);
       updateTemplate(selectedTemplate.id, (template) => ({
         ...template,
-        template: nextValue,
         variables: Array.from(new Set([...(template.variables || []), token])),
       }));
+      if (token === DOCUMENT_WORKS_TABLE_TOKEN) {
+        toast.success('Таблица работ вставлена. CRM подставит реальные позиции при печати акта.');
+      }
+      if (token === DOCUMENT_CLIENT_DATA_TABLE_TOKEN) {
+        toast.success('Таблица данных клиента вставлена. Можно редактировать ячейки и подписи — при печати подставятся данные заказа.');
+      }
       return;
     }
 
@@ -590,50 +1271,6 @@ const Settings: React.FC = () => {
     }));
   };
 
-  const handleAddPaymentMethod = () => {
-    const code = newPaymentMethod.code.trim().toLowerCase().replace(/\s+/g, '_');
-    const label = newPaymentMethod.label.trim();
-    if (!code || !label) {
-      toast.error('Укажите код и название способа оплаты');
-      return;
-    }
-    if (settings.payment.paymentMethodOptions.some((item) => item.code === code)) {
-      toast.error('Такой код способа оплаты уже существует');
-      return;
-    }
-    setPaymentMethodOptions([
-      ...settings.payment.paymentMethodOptions,
-      {
-        code,
-        label,
-        enabled: true,
-        registerType: newPaymentMethod.registerType,
-      },
-    ]);
-    setNewPaymentMethod({ code: '', label: '', registerType: 'cashbox' });
-  };
-
-  const handleAddQuickSale = () => {
-    const label = newQuickSale.label.trim();
-    const category = newQuickSale.category.trim();
-    if (!label || !category) {
-      toast.error('Укажите название кнопки и категорию склада');
-      return;
-    }
-    setCategoryValue('orders', 'quickSaleOptions', [
-      ...settings.orders.quickSaleOptions,
-      {
-        id: `quick_sale_${Date.now()}`,
-        label,
-        category,
-        saleMode: newQuickSale.saleMode,
-        enabled: true,
-        sortOrder: settings.orders.quickSaleOptions.length + 1,
-      },
-    ]);
-    setNewQuickSale({ label: '', category: '', saleMode: 'quantity' });
-  };
-
   const normalizeStatusCode = (value: string) =>
     value
       .toLowerCase()
@@ -641,6 +1278,37 @@ const Settings: React.FC = () => {
       .replace(/\s+/g, '_')
       .replace(/[^\wа-яё-]/gi, '')
       .slice(0, 40);
+
+  const buildPaymentMethodCode = (label: string, existingCodes: string[]) => {
+    const base = normalizeStatusCode(label) || `method_${Date.now()}`;
+    let code = base;
+    let suffix = 2;
+    while (existingCodes.includes(code)) {
+      code = `${base}_${suffix}`;
+      suffix += 1;
+    }
+    return code;
+  };
+
+  const handleAddPaymentMethod = () => {
+    const label = newPaymentMethodLabel.trim();
+    if (!label) {
+      toast.error('Укажите название способа оплаты');
+      return;
+    }
+    const existingCodes = settings.payment.paymentMethodOptions.map((item) => item.code);
+    const code = buildPaymentMethodCode(label, existingCodes);
+    setPaymentMethodOptions([
+      ...settings.payment.paymentMethodOptions,
+      {
+        code,
+        label,
+        enabled: true,
+        registerType: 'mixed',
+      },
+    ]);
+    setNewPaymentMethodLabel('');
+  };
 
   const setOrderStatuses = (nextStatuses: OrderStatusSetting[]) => {
     const sorted = [...nextStatuses].sort((a, b) => a.sortOrder - b.sortOrder);
@@ -677,12 +1345,27 @@ const Settings: React.FC = () => {
   };
 
   const handleUpdateOrderStatus = (statusId: string, patch: Partial<OrderStatusSetting>) => {
+    const currentStatus = settings.orders.statuses.find((status) => status.id === statusId);
+    if (!currentStatus) {
+      return;
+    }
+
+    const nextPatch = isSystemNewOrderStatus(currentStatus)
+      ? patch.color
+        ? { color: patch.color }
+        : {}
+      : patch;
+
+    if (Object.keys(nextPatch).length === 0) {
+      return;
+    }
+
     setOrderStatuses(
       settings.orders.statuses.map((status) =>
         status.id === statusId
           ? {
               ...status,
-              ...patch,
+              ...nextPatch,
             }
           : status
       )
@@ -694,6 +1377,10 @@ const Settings: React.FC = () => {
     if (!statusToRemove) {
       return;
     }
+    if (isSystemNewOrderStatus(statusToRemove)) {
+      toast.error('Статус «Новый» нельзя удалить');
+      return;
+    }
 
     setOrderStatuses(
       settings.orders.statuses
@@ -703,16 +1390,29 @@ const Settings: React.FC = () => {
   };
 
   const handleInsertSmsVariable = (token: string) => {
-    if (smsEditorRef.current) {
-      smsEditorRef.current.focus();
-      smsEditorRef.current.insertContent(token);
-      const nextValue = smsEditorRef.current.getContent({ format: 'text' });
+    const currentValue = settings.integrations.smsStatusTemplates[selectedSmsStatusTemplate] || '';
+    const textarea = smsTextareaRef.current;
+
+    if (textarea) {
+      const start = textarea.selectionStart ?? currentValue.length;
+      const end = textarea.selectionEnd ?? currentValue.length;
+      const before = currentValue.slice(0, start);
+      const after = currentValue.slice(end);
+      const needsLeadingSpace = before.length > 0 && !/\s$/.test(before);
+      const insert = `${needsLeadingSpace ? ' ' : ''}${token}`;
+      const nextValue = `${before}${insert}${after}`;
+
       setNestedCategoryValue('integrations', 'smsStatusTemplates', selectedSmsStatusTemplate, nextValue);
+
+      requestAnimationFrame(() => {
+        const cursor = start + insert.length;
+        textarea.focus();
+        textarea.setSelectionRange(cursor, cursor);
+      });
       return;
     }
 
-    const currentValue = settings.integrations.smsStatusTemplates[selectedSmsStatusTemplate] || '';
-    const separator = currentValue.trim().length > 0 ? ' ' : '';
+    const separator = currentValue.length > 0 && !/\s$/.test(currentValue) ? ' ' : '';
     setNestedCategoryValue(
       'integrations',
       'smsStatusTemplates',
@@ -729,7 +1429,7 @@ const Settings: React.FC = () => {
     const copy: DocumentTemplate = {
       ...selectedTemplate,
       id: `tpl_copy_${Date.now()}`,
-      name: `${selectedTemplate.name} (?????)`,
+      name: `${selectedTemplate.name} (копия)`,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -742,7 +1442,7 @@ const Settings: React.FC = () => {
       },
     }));
     setSelectedTemplateId(copy.id);
-    toast.success('?????? ??????????');
+    toast.success('Шаблон скопирован');
   };
 
   const handleExportTemplates = () => {
@@ -758,7 +1458,7 @@ const Settings: React.FC = () => {
     link.download = `documents-templates-${new Date().toISOString().slice(0, 10)}.json`;
     link.click();
     URL.revokeObjectURL(url);
-    toast.success('??????? ??????????????');
+    toast.success('Шаблоны экспортированы');
   };
 
   const handleImportTemplates = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -771,7 +1471,7 @@ const Settings: React.FC = () => {
       const content = await file.text();
       const parsed = JSON.parse(content) as { templates?: DocumentTemplate[] };
       if (!Array.isArray(parsed.templates)) {
-        throw new Error('???????? ?????? ?????');
+        throw new Error('Некорректный файл шаблона');
       }
 
       const imported = parsed.templates.map((template, index) => ({
@@ -793,245 +1493,385 @@ const Settings: React.FC = () => {
         setSelectedTemplateId(imported[0].id);
       }
 
-      toast.success(`????????????? ????????: ${imported.length}`);
+      toast.success(`Импортировано шаблонов: ${imported.length}`);
     } catch (error) {
       console.error(error);
-      toast.error('?? ??????? ????????????? ???????');
+      toast.error('Не удалось импортировать шаблон');
     } finally {
       event.target.value = '';
     }
   };
 
   const renderDocumentsSection = () => {
-    const previewHtml = (selectedTemplate?.template || '')
-      .replaceAll('{{documentTitle}}', selectedTemplate?.name || 'Новый документ')
-      .replaceAll('{{companyName}}', settings.business.companyName)
-      .replaceAll('{{companyPhone}}', settings.business.phone)
-      .replaceAll('{{companyEmail}}', settings.business.email)
-      .replaceAll('{{companyAddress}}', settings.business.address)
-      .replaceAll('{{workingHours}}', settings.business.workingHours)
-      .replaceAll('{{orderNumber}}', '000123')
-      .replaceAll('{{clientName}}', 'Иван Петров')
-      .replaceAll('{{clientPhone}}', '+7 999 123-45-67')
-      .replaceAll('{{clientEmail}}', 'client@example.com')
-      .replaceAll('{{clientAddress}}', 'Екатеринбург')
-      .replaceAll('{{device}}', 'Apple iPhone 15 Pro Max')
-      .replaceAll('{{deviceBrand}}', 'Apple')
-      .replaceAll('{{deviceModel}}', 'iPhone 15 Pro Max')
-      .replaceAll('{{color}}', 'Черный')
-      .replaceAll('{{serialNumber}}', 'SN-123456')
-      .replaceAll('{{imei}}', '123456789012345')
-      .replaceAll('{{password}}', '1234')
-      .replaceAll('{{completeness}}', 'Кабель, коробка')
-      .replaceAll('{{appearance}}', 'Следы эксплуатации')
-      .replaceAll('{{problemDescription}}', 'Не заряжается, требуется проверка разъема')
-      .replaceAll('{{diagnosis}}', 'Неисправен разъем питания')
-      .replaceAll('{{estimatedCost}}', '2 500 ₽')
-      .replaceAll('{{totalCost}}', '4 900 ₽')
-      .replaceAll('{{advancePayment}}', '1 000 ₽')
-      .replaceAll('{{discount}}', '0 ₽')
-      .replaceAll('{{paymentMethod}}', 'Наличные')
-      .replaceAll('{{debt}}', '3 900 ₽')
-      .replaceAll('{{works}}', 'Замена разъема питания')
-      .replaceAll('{{parts}}', 'Разъем зарядки')
-      .replaceAll('{{technician}}', 'Иванов Алексей')
-      .replaceAll('{{intakeManager}}', 'Петрова Мария')
-      .replaceAll('{{deliveryManager}}', 'Петрова Мария')
-      .replaceAll('{{date}}', new Date().toLocaleDateString('ru-RU'))
-      .replaceAll('{{createdAt}}', new Date().toLocaleDateString('ru-RU'))
-      .replaceAll('{{completedAt}}', new Date().toLocaleDateString('ru-RU'))
-      .replaceAll('{{warrantyText}}', settings.documents.warrantyText)
-      .replaceAll('{{footerDisclaimer}}', settings.documents.footerDisclaimer)
-      .replaceAll('{{notes}}', 'Проверить шлейф и питание')
-      .replaceAll('{{recommendations}}', 'Рекомендуется замена кабеля')
-      .replaceAll('{{orderStatus}}', 'Диагностика')
-      .replaceAll('{{priority}}', 'Средний');
+    const documentVariableGroups = buildDocumentVariableGroups(settings);
+    const previewHtml = applyTemplateTokenValues(documentPreviewTemplate || selectedTemplate?.template || '', {
+      '{{НазваниеДокумента}}': selectedTemplate?.name || 'Новый документ',
+      '{{НазваниеКомпании}}': settings.business.companyName,
+      '{{ТелефонКомпании}}': settings.business.phone,
+      '{{EmailКомпании}}': settings.business.email,
+      '{{АдресКомпании}}': settings.business.address,
+      '{{ЧасыРаботы}}': settings.business.workingHours,
+      '{{НомерЗаказа}}': '000123',
+      '{{ФИОКлиента}}': 'Иван Петров',
+      '{{ТелефонКлиента}}': '+7 999 123-45-67',
+      '{{EmailКлиента}}': 'client@example.com',
+      '{{АдресКлиента}}': 'Екатеринбург',
+      '{{Устройство}}': 'Apple iPhone 15 Pro Max',
+      '{{БрендУстройства}}': 'Apple',
+      '{{МодельУстройства}}': 'iPhone 15 Pro Max',
+      '{{Цвет}}': 'Черный',
+      '{{СерийныйНомер}}': 'SN-123456',
+      '{{IMEI}}': '123456789012345',
+      '{{Пароль}}': '1234',
+      '{{Комплектация}}': 'Кабель, коробка',
+      '{{ВнешнийВид}}': 'Следы эксплуатации',
+      '{{ОписаниеПроблемы}}': 'Не заряжается, требуется проверка разъема',
+      '{{Диагностика}}': 'Неисправен разъем питания',
+      '{{ОриентировочнаяСтоимость}}': '2 500 ₽',
+      '{{ИтоговаяСтоимость}}': '4 900 ₽',
+      '{{Аванс}}': '1 000 ₽',
+      '{{Скидка}}': '0 ₽',
+      '{{СпособОплаты}}': 'Наличные',
+      '{{Долг}}': '3 900 ₽',
+      '{{Работы}}': 'Замена разъема питания, Диагностика устройства',
+      '{{ТаблицаДанныхКлиента}}': buildSampleDocumentClientDataTableHtml(
+        selectedTemplate?.type === 'completion' ? 'completion' : 'acceptance'
+      ),
+      '{{ТаблицаРабот}}': buildSampleDocumentWorksTableHtml(),
+      '{{Запчасти}}': 'Разъем зарядки',
+      '{{Мастер}}': 'Иванов Алексей',
+      '{{МенеджерПриёма}}': 'Петрова Мария',
+      '{{МенеджерВыдачи}}': 'Петрова Мария',
+      '{{Дата}}': new Date().toLocaleDateString('ru-RU'),
+      '{{ДатаСоздания}}': new Date().toLocaleDateString('ru-RU'),
+      '{{ДатаЗавершения}}': new Date().toLocaleDateString('ru-RU'),
+      '{{ДатаПриёма}}': new Date().toLocaleDateString('ru-RU'),
+      '{{ТекстГарантии}}': settings.documents.warrantyText,
+      '{{ТекстВПодвале}}': settings.documents.footerDisclaimer,
+      '{{Заметки}}': 'Проверить шлейф и питание',
+      '{{Рекомендации}}': 'Рекомендуется замена кабеля',
+      '{{СтатусЗаказа}}': 'Диагностика',
+      '{{Приоритет}}': 'Средний',
+      ...buildClientFieldPreviewValues(settings),
+    });
+
+    const documentEditorMinHeight = 320;
+    const documentPreviewSx = {
+      width: '100%',
+      overflow: 'visible',
+      p: 2,
+      borderRadius: 2,
+      border: '1px dashed',
+      borderColor: 'divider',
+      bgcolor: '#ffffff',
+      color: '#111111',
+      boxSizing: 'border-box' as const,
+      '& h1, & h2, & h3': { mt: 0, color: '#13254b' },
+      '& p': { mb: 1.5, lineHeight: 1.6, color: '#111111' },
+      '& table': { width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' },
+      '& td, & th': {
+        border: '1px solid #d7dee7',
+        padding: '8px 10px',
+        wordBreak: 'break-word',
+        color: '#111111',
+      },
+    };
 
     return (
-      <Stack spacing={3}>
-        <Alert severity="info">
-          Создавайте и редактируйте шаблоны документов для заказов, продаж, склада и других разделов.
-        </Alert>
+      <Stack spacing={2} sx={{ pr: { xs: 0.5, md: 1 } }}>
+        <Box
+          sx={{
+            px: 2,
+            py: 1.25,
+            borderRadius: 2,
+            bgcolor: 'rgba(37, 99, 235, 0.06)',
+            border: `1px solid ${'var(--crm-border)'}`,
+          }}
+        >
+          <Typography variant="body2" color="text.secondary">
+            Шаблоны для заказов, продаж и склада. Нажмите на переменную справа — она вставится в редактор.
+          </Typography>
+        </Box>
 
-        <Grid container spacing={3}>
-          <Grid item xs={12} md={3.5}>
-            <Card variant="outlined">
-              <CardContent>
+        <Grid container spacing={2} alignItems="flex-start">
+          <Grid item xs={12} lg={3} sx={{ alignSelf: 'flex-start' }}>
+            <Card sx={{ ...panelCardSx, width: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              <Box sx={{ px: 2, pt: 2, pb: 1.5, borderBottom: `1px solid ${'var(--crm-border)'}`, flexShrink: 0 }}>
+                <input ref={importInputRef} type="file" accept="application/json" hidden onChange={handleImportTemplates} />
+                <Typography variant="subtitle1" fontWeight={800} sx={{ mb: 1.5 }}>
+                  Шаблоны
+                </Typography>
+                <Stack direction="row" spacing={0.75}>
+                  <Tooltip title="Импорт JSON">
+                    <Button size="small" variant="outlined" onClick={() => importInputRef.current?.click()} sx={{ minWidth: 0, px: 1.25 }}>
+                      <FileUpload fontSize="small" />
+                    </Button>
+                  </Tooltip>
+                  <Tooltip title="Экспорт JSON">
+                    <Button size="small" variant="outlined" onClick={handleExportTemplates} sx={{ minWidth: 0, px: 1.25 }}>
+                      <FileDownload fontSize="small" />
+                    </Button>
+                  </Tooltip>
+                  <Button size="small" variant="contained" startIcon={<Add />} onClick={handleCreateTemplate} sx={{ flex: 1 }}>
+                    Создать
+                  </Button>
+                </Stack>
+              </Box>
+
+              <Box sx={{ overflow: 'auto', px: 1.5, py: 1.5 }}>
                 <Stack spacing={2}>
-                  <input ref={importInputRef} type="file" accept="application/json" hidden onChange={handleImportTemplates} />
-                  <Stack direction="row" alignItems="center" justifyContent="space-between">
-                    <Typography variant="h6" fontWeight={800}>Шаблоны документов</Typography>
-                    <Stack direction="row" spacing={1}>
-                      <Button size="small" variant="outlined" startIcon={<FileUpload />} onClick={() => importInputRef.current?.click()}>Импорт</Button>
-                      <Button size="small" variant="outlined" startIcon={<FileDownload />} onClick={handleExportTemplates}>Экспорт</Button>
-                      <Button size="small" variant="contained" startIcon={<Add />} onClick={handleCreateTemplate}>Создать документ</Button>
-                    </Stack>
-                  </Stack>
-
                   {documentCategories.map((group) => (
                     <Box key={group.value}>
-                      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
-                        <Typography variant="subtitle2" color="text.secondary">{group.label}</Typography>
-                        <Chip size="small" label={group.items.length} />
+                      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1, px: 0.5 }}>
+                        <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
+                          {group.label}
+                        </Typography>
+                        <Chip size="small" label={group.items.length} sx={{ height: 20, fontSize: '0.7rem' }} />
                       </Stack>
-                      <Stack spacing={1}>
-                        {group.items.map((template) => (
-                          <Card
-                            key={template.id}
-                            variant="outlined"
-                            sx={{
-                              borderColor: selectedTemplateId === template.id ? 'primary.main' : 'divider',
-                              bgcolor: selectedTemplateId === template.id ? 'rgba(255,122,26,0.06)' : 'transparent',
-                            }}
-                          >
-                            <CardContent sx={{ py: 1.5 }}>
+                      <Stack spacing={0.75}>
+                        {group.items.map((template) => {
+                          const isSelected = selectedTemplateId === template.id;
+                          return (
+                            <Box
+                              key={template.id}
+                              onClick={() => handleSelectDocumentTemplate(template.id)}
+                              sx={{
+                                p: 1.25,
+                                borderRadius: 2,
+                                border: '1px solid',
+                                borderColor: isSelected ? 'primary.main' : 'var(--crm-border)',
+                                bgcolor: isSelected ? 'rgba(234, 88, 12, 0.07)' : 'background.paper',
+                                cursor: 'pointer',
+                                transition: 'border-color 0.15s ease, background-color 0.15s ease',
+                                '&:hover': {
+                                  borderColor: isSelected ? 'primary.main' : 'primary.light',
+                                  bgcolor: isSelected ? 'rgba(234, 88, 12, 0.09)' : 'rgba(234, 88, 12, 0.03)',
+                                },
+                              }}
+                            >
                               <Stack direction="row" spacing={1} alignItems="flex-start">
-                                <ListItemButton
-                                  selected={selectedTemplateId === template.id}
-                                  onClick={() => setSelectedTemplateId(template.id)}
-                                  sx={{ borderRadius: 2, px: 1, py: 0.5, alignItems: 'flex-start' }}
-                                >
-                                  <ListItemIcon sx={{ minWidth: 32, mt: 0.2 }}>
-                                    {template.type === 'completion' ? <AssignmentTurnedIn fontSize="small" /> : <Article fontSize="small" />}
-                                  </ListItemIcon>
-                                  <ListItemText
-                                    primary={template.name}
-                                    secondary={template.description || documentTypeOptions.find((item) => item.value === template.type)?.label}
-                                  />
-                                </ListItemButton>
-                                {selectedTemplateId === template.id && (
-                                  <IconButton color="primary" onClick={handleCloneTemplate}>
-                                    <ContentCopy />
-                                  </IconButton>
+                                <Box sx={{ color: isSelected ? 'primary.main' : 'text.secondary', mt: 0.25, display: 'flex' }}>
+                                  {template.type === 'completion' ? <AssignmentTurnedIn fontSize="small" /> : <Article fontSize="small" />}
+                                </Box>
+                                <Box sx={{ flex: 1, minWidth: 0 }}>
+                                  <Typography variant="body2" fontWeight={700} noWrap>
+                                    {template.name}
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1.35 }}>
+                                    {template.description || documentTypeOptions.find((item) => item.value === template.type)?.label}
+                                  </Typography>
+                                </Box>
+                                {isSelected && (
+                                  <Stack direction="row" spacing={0.25} onClick={(event) => event.stopPropagation()}>
+                                    <Tooltip title="Дублировать">
+                                      <IconButton size="small" color="primary" onClick={handleCloneTemplate}>
+                                        <ContentCopy fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+                                    <Tooltip title="Удалить">
+                                      <IconButton size="small" color="error" onClick={() => handleDeleteTemplate(template.id)}>
+                                        <DeleteOutline fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+                                  </Stack>
                                 )}
-                                <IconButton color="error" onClick={() => handleDeleteTemplate(template.id)}>
-                                  <DeleteOutline />
-                                </IconButton>
                               </Stack>
-                            </CardContent>
-                          </Card>
-                        ))}
+                            </Box>
+                          );
+                        })}
                       </Stack>
                     </Box>
                   ))}
                 </Stack>
-              </CardContent>
+              </Box>
             </Card>
           </Grid>
 
-          <Grid item xs={12} md={8.5}>
+          <Grid item xs={12} lg={9}>
             {!selectedTemplate ? (
-              <Alert severity="warning">Создай или выбери шаблон слева для редактирования.</Alert>
+              <Card sx={{ ...panelCardSx, height: '100%' }}>
+                <CardContent sx={{ py: 6, textAlign: 'center' }}>
+                  <Article sx={{ fontSize: 40, color: 'text.disabled', mb: 1 }} />
+                  <Typography fontWeight={700}>Выберите шаблон слева</Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                    Или создайте новый документ кнопкой «Создать».
+                  </Typography>
+                </CardContent>
+              </Card>
             ) : (
-              <Stack spacing={3}>
-                <Card variant="outlined">
-                  <CardContent>
-                    <Grid container spacing={2}>
-                      <Grid item xs={12} md={6}>
-                        <TextField fullWidth label="Название документа" value={selectedTemplate.name} onChange={(event) => updateTemplate(selectedTemplate.id, (template) => ({ ...template, name: event.target.value }))} />
-                      </Grid>
-                      <Grid item xs={12} md={3}>
-                        <FormControl fullWidth>
-                          <InputLabel>Категория</InputLabel>
-                          <Select value={selectedTemplate.category} label="Категория" onChange={(event) => updateTemplate(selectedTemplate.id, (template) => ({ ...template, category: event.target.value as DocumentTemplate['category'] }))}>
-                            {documentCategoryOptions.map((option) => (<MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                      <Grid item xs={12} md={3}>
-                        <FormControl fullWidth>
-                          <InputLabel>Тип</InputLabel>
-                          <Select value={selectedTemplate.type} label="Тип" onChange={(event) => updateTemplate(selectedTemplate.id, (template) => ({ ...template, type: event.target.value as DocumentTemplate['type'] }))}>
-                            {documentTypeOptions.map((option) => (<MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                      <Grid item xs={12} md={9}>
-                        <TextField fullWidth label="Описание" value={selectedTemplate.description || ''} onChange={(event) => updateTemplate(selectedTemplate.id, (template) => ({ ...template, description: event.target.value }))} />
-                      </Grid>
-                      <Grid item xs={12} md={3}>
-                        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ minHeight: 56, px: 2, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-                          <Typography fontWeight={700}>Активен</Typography>
-                          <Switch checked={selectedTemplate.isActive} onChange={(event) => updateTemplate(selectedTemplate.id, (template) => ({ ...template, isActive: event.target.checked }))} />
-                        </Stack>
-                      </Grid>
-                    </Grid>
-                  </CardContent>
-                </Card>
-
-                <Grid container spacing={3}>
-                  <Grid item xs={12} lg={8}>
-                    <Card variant="outlined">
-                      <CardContent>
-                        <Stack spacing={2}>
-                          <Typography variant="h6" fontWeight={800}>HTML шаблон</Typography>
-                          <TinyMceEditor
-                            value={selectedTemplate.template}
-                            onReady={(editor) => {
-                              tinyEditorRef.current = editor;
-                            }}
-                            onChange={(nextValue) =>
-                              updateTemplate(selectedTemplate.id, (template) => ({
-                                ...template,
-                                template: nextValue,
-                              }))
-                            }
-                            height={720}
-                          />
-                          <Typography variant="body2" color="text.secondary">
-                            Можно использовать HTML и переменные вида {'{{clientName}}'}.
-                          </Typography>
-                        </Stack>
-                      </CardContent>
-                    </Card>
-                  </Grid>
-
-                  <Grid item xs={12} lg={4}>
-                    <Card variant="outlined">
-                      <CardContent>
-                        <Stack spacing={2}>
-                          <Typography variant="h6" fontWeight={800}>Переменные</Typography>
-                          {documentVariableGroups.map((group) => (
-                            <Box key={group.title}>
-                              <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>{group.title}</Typography>
-                              <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-                                {group.variables.map((variable) => (
-                                  <Chip key={variable} label={variable} onClick={() => handleInsertVariable(variable)} sx={{ cursor: 'pointer' }} />
-                                ))}
-                              </Stack>
-                            </Box>
-                          ))}
-                        </Stack>
-                      </CardContent>
-                    </Card>
-                  </Grid>
-                </Grid>
-
-                <Card variant="outlined">
-                  <CardContent>
-                    <Stack spacing={2}>
-                      <Stack direction="row" spacing={1} alignItems="center">
-                        <Preview color="primary" />
-                        <Typography variant="h6" fontWeight={800}>Предпросмотр</Typography>
-                      </Stack>
-                      <Box
-                        sx={{
-                          minHeight: 280,
-                          p: 3,
-                          borderRadius: 3,
-                          border: '1px dashed',
-                          borderColor: 'divider',
-                          bgcolor: '#fff',
-                          '& h1, & h2, & h3': { mt: 0, color: '#13254b' },
-                          '& p': { mb: 1.5, lineHeight: 1.6 },
-                          '& table': { width: '100%', borderCollapse: 'collapse' },
-                          '& td, & th': { border: '1px solid #d7dee7', padding: '8px 10px' },
-                        }}
-                        dangerouslySetInnerHTML={{ __html: previewHtml }}
+              <Stack spacing={2}>
+                <Card sx={panelCardSx}>
+                  <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }}>
+                      <TextField
+                        fullWidth
+                        size="small"
+                        label="Название документа"
+                        value={selectedTemplate.name}
+                        onChange={(event) =>
+                          updateTemplate(selectedTemplate.id, (template) => ({ ...template, name: event.target.value }))
+                        }
                       />
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        spacing={1}
+                        sx={{
+                          flexShrink: 0,
+                          px: 1.5,
+                          py: 0.75,
+                          borderRadius: 2,
+                          bgcolor: 'background.default',
+                          border: `1px solid ${'var(--crm-border)'}`,
+                        }}
+                      >
+                        <Typography variant="body2" fontWeight={600}>
+                          Активен
+                        </Typography>
+                        <Switch
+                          size="small"
+                          checked={selectedTemplate.isActive}
+                          onChange={(event) =>
+                            updateTemplate(selectedTemplate.id, (template) => ({ ...template, isActive: event.target.checked }))
+                          }
+                        />
+                      </Stack>
                     </Stack>
                   </CardContent>
                 </Card>
+
+                <Grid container spacing={2} alignItems="stretch" sx={{ width: '100%', m: 0 }}>
+                  <Grid item xs={12} xl={8} sx={{ pl: '0 !important' }}>
+                    <Card sx={{ ...panelCardSx, width: '100%', height: '100%' }}>
+                      <Box sx={{ px: 2, pt: 1.75, pb: 1, borderBottom: `1px solid ${'var(--crm-border)'}` }}>
+                        <Typography variant="subtitle1" fontWeight={800}>
+                          HTML шаблон
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                          Поддерживаются HTML и переменные вида {'{{ФИОКлиента}}'}
+                        </Typography>
+                        {(selectedTemplate.type === 'completion' || selectedTemplate.type === 'acceptance') && (
+                          <Alert severity="info" sx={{ mt: 1.25, py: 0.5 }}>
+                            {selectedTemplate.type === 'completion'
+                              ? 'Для таблицы работ нажмите «Таблица работ» справа. Для блока клиента/устройства/ремонта — «Таблица данных клиента». CRM подставит реальные данные при печати.'
+                              : 'Для блока клиента, устройства и ремонта нажмите «Таблица данных клиента» справа — CRM подставит данные заказа при печати акта.'}
+                          </Alert>
+                        )}
+                      </Box>
+                      <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
+                        <Box sx={{ borderRadius: 2, border: `1px solid ${'var(--crm-border)'}` }}>
+                          <TinyMceEditor
+                            key={`${selectedTemplate.id}-${documentEditorRevision}`}
+                            initialValue={decorateDocumentTemplateForEditor(
+                              documentTemplateDraftRef.current[selectedTemplate.id] ?? selectedTemplate.template,
+                              selectedTemplate.type === 'completion' ? 'completion' : 'acceptance'
+                            )}
+                            autoResize
+                            minHeight={documentEditorMinHeight}
+                            onReady={handleDocumentEditorReady}
+                            onChange={handleDocumentEditorChange}
+                          />
+                        </Box>
+                        <Box sx={{ mt: 1.5 }}>
+                          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                            <Preview color="primary" fontSize="small" />
+                            <Typography variant="subtitle2" fontWeight={700}>
+                              Как увидит клиент
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              (примерные данные)
+                            </Typography>
+                          </Stack>
+                          <Box sx={documentPreviewSx} dangerouslySetInnerHTML={{ __html: previewHtml }} />
+                        </Box>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+
+                  <Grid item xs={12} xl={4} sx={{ pr: { xs: '8px !important', xl: '20px !important' }, pl: { xl: '8px !important' } }}>
+                    <Box sx={{ pr: { xs: 1, md: 2 }, boxSizing: 'border-box', height: '100%' }}>
+                      <Card
+                        sx={{
+                          ...panelCardSx,
+                          display: 'flex',
+                          flexDirection: 'column',
+                          overflow: 'hidden',
+                          height: '100%',
+                          minHeight: 320,
+                        }}
+                      >
+                        <Box sx={{ px: 2, pr: 3, pt: 1.75, pb: 1, borderBottom: `1px solid ${'var(--crm-border)'}`, flexShrink: 0 }}>
+                          <Typography variant="subtitle1" fontWeight={800}>
+                            Переменные
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Клик — вставка в шаблон
+                          </Typography>
+                        </Box>
+                        <Box
+                          sx={{
+                            flex: 1,
+                            overflowY: 'auto',
+                            overflowX: 'hidden',
+                            pl: 2,
+                            pr: 3,
+                            py: 1.5,
+                            boxSizing: 'border-box',
+                            scrollbarGutter: 'stable',
+                          }}
+                        >
+                          <Stack spacing={1.75} divider={<Divider flexItem />} sx={{ pr: 1 }}>
+                            {documentVariableGroups.map((group) => (
+                              <Box key={group.title} sx={{ pr: 1 }}>
+                                <Typography
+                                  variant="caption"
+                                  fontWeight={700}
+                                  color="text.secondary"
+                                  sx={{ display: 'block', mb: 0.75, textTransform: 'uppercase', letterSpacing: 0.5 }}
+                                >
+                                  {group.title}
+                                </Typography>
+                                <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ maxWidth: '100%' }}>
+                                  {group.variables.map((variable) => (
+                                    <Tooltip key={variable.token} title={variable.token} arrow>
+                                      <Chip
+                                        label={variable.label}
+                                        size="small"
+                                        variant="outlined"
+                                        onClick={() => handleInsertVariable(variable.token)}
+                                        sx={{
+                                          cursor: 'pointer',
+                                          height: 'auto',
+                                          borderRadius: 1.5,
+                                          bgcolor: 'background.paper',
+                                          borderColor: 'var(--crm-border)',
+                                          transition: 'background-color 0.15s ease, border-color 0.15s ease',
+                                          '& .MuiChip-label': {
+                                            whiteSpace: 'normal',
+                                            py: 0.5,
+                                            lineHeight: 1.3,
+                                            color: 'var(--crm-color-ink)',
+                                          },
+                                          '&:hover': {
+                                            bgcolor: 'var(--crm-color-primary)',
+                                            borderColor: 'var(--crm-color-primary-dark)',
+                                            '& .MuiChip-label': {
+                                              color: '#ffffff',
+                                            },
+                                          },
+                                        }}
+                                      />
+                                    </Tooltip>
+                                  ))}
+                                </Stack>
+                              </Box>
+                            ))}
+                          </Stack>
+                        </Box>
+                      </Card>
+                    </Box>
+                  </Grid>
+                </Grid>
               </Stack>
             )}
           </Grid>
@@ -1041,13 +1881,13 @@ const Settings: React.FC = () => {
   };
 
   const renderFormsEditor = (
-    listKey: 'orderTypes' | 'orderFields' | 'clientTypes' | 'clientFields' | 'directories',
+    listKey: 'clientFields',
     options?: { withRequired?: boolean; hint?: string }
   ) => {
     const items = settings.forms[listKey];
     return (
       <Stack spacing={2}>
-        {options?.hint && <Alert severity="info">{options.hint}</Alert>}
+        {options?.hint && renderSectionIntro(options.hint)}
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5}>
           <TextField
             fullWidth
@@ -1059,11 +1899,16 @@ const Settings: React.FC = () => {
             Добавить
           </Button>
         </Stack>
-        <Card variant="outlined">
+        {items.length === 0 && (
+          <Alert severity="info">Элементов пока нет. Добавьте первый через поле выше.</Alert>
+        )}
+        {items.length > 0 && (
+        <Card sx={panelCardSx}>
           <CardContent>
             <Stack spacing={1.5}>
               {items.map((item) => (
-                <Stack key={item.id} direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'stretch', md: 'center' }} spacing={1.5}>
+                <Box key={item.id} sx={{ p: 1.5, border: `1px solid ${'var(--crm-border)'}`, borderRadius: 2, bgcolor: 'background.paper' }}>
+                <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'stretch', md: 'center' }} spacing={1.5}>
                   <TextField
                     size="small"
                     sx={{ flex: 1 }}
@@ -1105,63 +1950,327 @@ const Settings: React.FC = () => {
                     <DeleteOutline />
                   </IconButton>
                 </Stack>
+                </Box>
               ))}
             </Stack>
           </CardContent>
         </Card>
+        )}
       </Stack>
     );
   };
 
   const renderSectionContent = () => {
     switch (activeSection) {
+      case 'appearance':
+        return (
+          <Stack spacing={2.5}>
+            {renderAppearanceThemePanel()}
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>
+                  Готовые темы
+                </Typography>
+                <Grid container spacing={1.5}>
+                  {APPEARANCE_PRESET_OPTIONS.map((preset) => {
+                    const isSelected = settings.appearance.preset === preset.id;
+                    return (
+                      <Grid item xs={6} sm={4} md={3} key={preset.id}>
+                        <Box
+                          onClick={() => applyAppearancePreset(preset.id)}
+                          sx={{
+                            cursor: 'pointer',
+                            borderRadius: 2.5,
+                            border: isSelected ? `2px solid ${preset.preview}` : `1px solid ${'var(--crm-border)'}`,
+                            p: 1.5,
+                            bgcolor: 'background.paper',
+                            transition: 'transform 0.15s ease, box-shadow 0.15s ease',
+                            '&:hover': {
+                              transform: 'translateY(-2px)',
+                              boxShadow: 2,
+                            },
+                          }}
+                        >
+                          <Box
+                            sx={{
+                              height: 44,
+                              borderRadius: 1.5,
+                              mb: 1,
+                              background: `linear-gradient(135deg, ${preset.preview} 0%, ${APPEARANCE_PRESETS[preset.id]?.sidebarColor || '#0f172a'} 100%)`,
+                            }}
+                          />
+                          <Typography fontWeight={700} fontSize={14}>
+                            {preset.label}
+                          </Typography>
+                        </Box>
+                      </Grid>
+                    );
+                  })}
+                </Grid>
+              </CardContent>
+            </Card>
+
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>
+                  Цвета интерфейса
+                </Typography>
+                <Grid container spacing={2}>
+                  {([
+                    ['primaryColor', 'Основной акцент'],
+                    ['primaryLight', 'Светлый акцент'],
+                    ['primaryDark', 'Тёмный акцент'],
+                    ['secondaryColor', 'Вторичный цвет'],
+                    ['sidebarColor', 'Боковое меню'],
+                    ['surfaceColor', 'Фон страниц'],
+                    ['inkColor', 'Основной текст'],
+                  ] as const).map(([field, label]) => (
+                    <Grid item xs={12} sm={6} md={4} key={field}>
+                      <Stack direction="row" spacing={1.5} alignItems="center">
+                        <Box
+                          component="input"
+                          type="color"
+                          value={settings.appearance[field]}
+                          onChange={(event) => setAppearanceValue(field, event.target.value)}
+                          sx={{
+                            width: 48,
+                            height: 48,
+                            border: `1px solid ${'var(--crm-border)'}`,
+                            borderRadius: 1.5,
+                            p: 0.5,
+                            bgcolor: 'background.paper',
+                            cursor: 'pointer',
+                          }}
+                        />
+                        <TextField
+                          fullWidth
+                          label={label}
+                          value={settings.appearance[field]}
+                          onChange={(event) => setAppearanceValue(field, event.target.value)}
+                        />
+                      </Stack>
+                    </Grid>
+                  ))}
+                </Grid>
+              </CardContent>
+            </Card>
+
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>
+                  Предпросмотр
+                </Typography>
+                <Box
+                  sx={{
+                    borderRadius: 3,
+                    overflow: 'hidden',
+                    border: `1px solid ${appearancePreview.colors.line}`,
+                  }}
+                >
+                  <Box
+                    sx={{
+                      display: 'grid',
+                      gridTemplateColumns: { xs: '1fr', md: '220px 1fr' },
+                      minHeight: 180,
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        p: 2,
+                        background: appearancePreview.gradients.sidebar,
+                        color: '#fff',
+                      }}
+                    >
+                      <Typography variant="overline" sx={{ color: 'rgba(255,255,255,0.65)' }}>
+                        CRM
+                      </Typography>
+                      <Box
+                        sx={{
+                          mt: 1.5,
+                          px: 1.5,
+                          py: 1,
+                          borderRadius: 2,
+                          background: appearancePreview.gradients.active,
+                          border: `1px solid ${appearancePreview.colors.primaryLight}47`,
+                        }}
+                      >
+                        Активный раздел
+                      </Box>
+                      <Typography variant="body2" sx={{ mt: 1.5, color: 'rgba(255,255,255,0.72)' }}>
+                        Боковое меню
+                      </Typography>
+                    </Box>
+                    <Box sx={{ p: 2.5, bgcolor: appearancePreview.colors.surface }}>
+                      <Typography sx={{ color: appearancePreview.colors.ink, fontWeight: 800, mb: 1.5 }}>
+                        Рабочая область
+                      </Typography>
+                      <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap>
+                        <Button variant="contained" sx={{ bgcolor: appearancePreview.colors.primary, '&:hover': { bgcolor: appearancePreview.colors.primaryDark } }}>
+                          Основная кнопка
+                        </Button>
+                        <Button variant="outlined" sx={{ borderColor: appearancePreview.colors.secondary, color: appearancePreview.colors.secondary }}>
+                          Вторичная
+                        </Button>
+                        <Chip label="Акцент" sx={{ bgcolor: `${appearancePreview.colors.primary}22`, color: appearancePreview.colors.primaryDark }} />
+                      </Stack>
+                    </Box>
+                  </Box>
+                </Box>
+              </CardContent>
+            </Card>
+
+            <Stack direction="row" justifyContent="flex-end">
+              <Button variant="outlined" startIcon={<Refresh />} onClick={handleResetAppearance}>
+                Сбросить к основной теме
+              </Button>
+            </Stack>
+          </Stack>
+        );
       case 'business':
         return (
-          <Grid container spacing={2}>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Название компании" value={settings.business.companyName} onChange={(event) => setCategoryValue('business', 'companyName', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Телефон" value={settings.business.phone} onChange={(event) => setCategoryValue('business', 'phone', event.target.value)} />
-            </Grid>
-            <Grid item xs={12}>
-              <TextField fullWidth label="Адрес" value={settings.business.address} onChange={(event) => setCategoryValue('business', 'address', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Email" value={settings.business.email} onChange={(event) => setCategoryValue('business', 'email', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={3}>
-              <TextField fullWidth label="Часы работы" value={settings.business.workingHours} onChange={(event) => setCategoryValue('business', 'workingHours', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={3}>
-              <FormControl fullWidth>
-                <InputLabel>Часовой пояс</InputLabel>
-                <Select value={settings.business.timezone} label="Часовой пояс" onChange={(event) => setCategoryValue('business', 'timezone', event.target.value)}>
-                  <MenuItem value="Asia/Yekaterinburg">Екатеринбург</MenuItem>
-                  <MenuItem value="Europe/Moscow">Москва</MenuItem>
-                  <MenuItem value="Asia/Almaty">Алматы</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-          </Grid>
+          <Stack spacing={2.5}>
+            {renderSectionIntro(
+              'Реквизиты компании подставляются в документы, письма клиентам и печатные формы. Email используется как контакт для клиентов.'
+            )}
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>
+                  Основные данные
+                </Typography>
+                <Grid container spacing={2}>
+                  <Grid item xs={12}>
+                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs: 'stretch', sm: 'center' }}>
+                      <Box
+                        sx={{
+                          width: 96,
+                          height: 96,
+                          borderRadius: 2,
+                          border: '1px dashed',
+                          borderColor: 'divider',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          overflow: 'hidden',
+                          bgcolor: 'background.default',
+                        }}
+                      >
+                        {settings.business.logoUrl ? (
+                          <Box component="img" src={settings.business.logoUrl} alt="Логотип" sx={{ maxWidth: '100%', maxHeight: '100%' }} />
+                        ) : (
+                          <Typography variant="caption" color="text.secondary">
+                            Логотип
+                          </Typography>
+                        )}
+                      </Box>
+                      <Stack spacing={1}>
+                        <Button component="label" variant="outlined" startIcon={<FileUpload />}>
+                          Загрузить логотип
+                          <input
+                            hidden
+                            accept="image/*"
+                            type="file"
+                            onChange={(event) => {
+                              const file = event.target.files?.[0];
+                              if (!file || file.size > MAX_LOGO_BYTES) {
+                                if (file) {
+                                  toast.error(`Логотип не больше ${MAX_LOGO_LABEL}`);
+                                }
+                                return;
+                              }
+                              const reader = new FileReader();
+                              reader.onload = () => setCategoryValue('business', 'logoUrl', String(reader.result || ''));
+                              reader.readAsDataURL(file);
+                              event.target.value = '';
+                            }}
+                          />
+                        </Button>
+                        {settings.business.logoUrl ? (
+                          <Button color="inherit" onClick={() => setCategoryValue('business', 'logoUrl', '')}>
+                            Удалить логотип
+                          </Button>
+                        ) : null}
+                      </Stack>
+                    </Stack>
+                  </Grid>
+                  <Grid item xs={12} md={6}>
+                    <TextField fullWidth label="Название компании" value={settings.business.companyName} onChange={(event) => setCategoryValue('business', 'companyName', event.target.value)} />
+                  </Grid>
+                  <Grid item xs={12} md={6}>
+                    <TextField fullWidth label="Телефон" value={settings.business.phone} onChange={(event) => setCategoryValue('business', 'phone', event.target.value)} />
+                  </Grid>
+                  <Grid item xs={12}>
+                    <TextField fullWidth label="Адрес" value={settings.business.address} onChange={(event) => setCategoryValue('business', 'address', event.target.value)} />
+                  </Grid>
+                  <Grid item xs={12} md={6}>
+                    <TextField fullWidth label="Email" value={settings.business.email} onChange={(event) => setCategoryValue('business', 'email', event.target.value)} />
+                  </Grid>
+                  <Grid item xs={12} md={3}>
+                    <TextField fullWidth label="Часы работы" value={settings.business.workingHours} onChange={(event) => setCategoryValue('business', 'workingHours', event.target.value)} />
+                  </Grid>
+                  <Grid item xs={12} md={3}>
+                    <FormControl fullWidth>
+                      <InputLabel>Часовой пояс</InputLabel>
+                      <Select value={settings.business.timezone} label="Часовой пояс" onChange={(event) => setCategoryValue('business', 'timezone', event.target.value)}>
+                        {TIMEZONE_OPTIONS.map((tz) => (
+                          <MenuItem key={tz.value} value={tz.value}>
+                            {tz.label}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                </Grid>
+              </CardContent>
+            </Card>
+          </Stack>
         );
       case 'locations':
         return (
-          <Stack spacing={2}>
+          <Stack spacing={2.5}>
+            {renderSectionIntro(
+              'Локации — ваши склады и точки приёма заказов. Они используются в заказах, на складе и в быстрых продажах. Первая локация включена в подписку, каждая дополнительная оплачивается отдельно.'
+            )}
+            <Alert severity={locationLimitReached ? 'warning' : 'info'}>
+              Использовано локаций: <strong>{locationsCount}</strong> из <strong>{locationSlots}</strong>
+              {locationLimitReached
+                ? '. Чтобы добавить ещё одну, оплатите подписку для дополнительной локации.'
+                : billingEnabled
+                  ? '. Можно добавить ещё ' + Math.max(0, locationSlots - locationsCount) + '.'
+                  : '.'}
+            </Alert>
             <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-              <TextField fullWidth label="Новая локация" value={newLocation} onChange={(event) => setNewLocation(event.target.value)} />
-              <Button variant="contained" startIcon={<Add />} onClick={handleAddLocation}>Добавить</Button>
+              <TextField
+                fullWidth
+                label="Новая локация"
+                value={newLocation}
+                onChange={(event) => setNewLocation(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    handleAddLocation();
+                  }
+                }}
+              />
+              <Button variant="contained" startIcon={<Add />} onClick={handleAddLocation} sx={{ flexShrink: 0 }}>
+                {locationLimitReached ? 'Оплатить и добавить' : 'Добавить'}
+              </Button>
             </Stack>
             <Stack spacing={1.5}>
+              {settings.locations.items.length === 0 && (
+                <Alert severity="info">Локаций пока нет. Добавьте первую — например «Центр» или «Филиал».</Alert>
+              )}
               {settings.locations.items.map((location) => (
-                <Card key={location} variant="outlined">
+                <Card key={location} sx={panelCardSx}>
                   <CardContent sx={{ py: 1.5 }}>
-                    <Stack direction="row" alignItems="center" justifyContent="space-between">
+                    <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2}>
                       <Box>
                         <Typography fontWeight={700}>{location}</Typography>
-                        <Typography variant="body2" color="text.secondary">Доступна в заказах и документах.</Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          Доступна в заказах и документах.
+                        </Typography>
                       </Box>
-                      <Button color="error" onClick={() => handleRemoveLocation(location)}>Убрать</Button>
+                      <Button color="error" variant="outlined" onClick={() => handleRemoveLocation(location)}>
+                        Убрать
+                      </Button>
                     </Stack>
                   </CardContent>
                 </Card>
@@ -1171,116 +2280,76 @@ const Settings: React.FC = () => {
         );
       case 'employees':
         return (
-          <Grid container spacing={2}>
-            <Grid item xs={12} md={4}>
-              <TextField fullWidth type="number" label="Процент за приемку" value={settings.employees.defaultIntakeRate} onChange={(event) => setCategoryValue('employees', 'defaultIntakeRate', Number(event.target.value) || 0)} />
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <TextField fullWidth type="number" label="Процент за исполнение" value={settings.employees.defaultExecutionRate} onChange={(event) => setCategoryValue('employees', 'defaultExecutionRate', Number(event.target.value) || 0)} />
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <TextField fullWidth type="number" label="Процент за выдачу" value={settings.employees.defaultDeliveryRate} onChange={(event) => setCategoryValue('employees', 'defaultDeliveryRate', Number(event.target.value) || 0)} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth type="time" label="Начало рабочего дня" value={settings.employees.defaultWorkStartTime} onChange={(event) => setCategoryValue('employees', 'defaultWorkStartTime', event.target.value)} InputLabelProps={{ shrink: true }} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth type="time" label="Конец рабочего дня" value={settings.employees.defaultWorkEndTime} onChange={(event) => setCategoryValue('employees', 'defaultWorkEndTime', event.target.value)} InputLabelProps={{ shrink: true }} />
-            </Grid>
-            <Grid item xs={12}>
-              <Alert severity="info">Это значения по умолчанию для новых сотрудников и стандартной смены в графике. Индивидуальные проценты задаются в разделе «Сотрудники».</Alert>
-            </Grid>
-          </Grid>
-        );
-      case 'profile':
-          return (
-            <Grid container spacing={2}>
-              <Grid item xs={12}>
-                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs: 'flex-start', sm: 'center' }}>
-                  <Avatar
-                    src={settings.profile.avatar || undefined}
-                    sx={{ width: 88, height: 88, fontSize: 36, bgcolor: 'primary.main' }}
-                  >
-                    <Person />
-                  </Avatar>
-                  <Stack direction="row" spacing={1} flexWrap="wrap">
-                    <Button
-                      variant="outlined"
-                      startIcon={<FileUpload />}
-                      onClick={() => profileAvatarInputRef.current?.click()}
-                    >
-                      Загрузить фото
-                    </Button>
-                    <Button
-                      variant="text"
-                      color="error"
-                      startIcon={<DeleteOutline />}
-                      onClick={() => setCategoryValue('profile', 'avatar', '')}
-                      disabled={!settings.profile.avatar}
-                    >
-                      Удалить фото
-                    </Button>
-                  </Stack>
-                  <input
-                    ref={profileAvatarInputRef}
-                    type="file"
-                    accept="image/*"
-                    style={{ display: 'none' }}
-                    onChange={handleProfileAvatarChange}
-                  />
-                </Stack>
+          <Stack spacing={2.5}>
+            {renderSectionIntro(
+              'Параметры по умолчанию для новых сотрудников. Права доступа к разделам CRM и настройкам задаются индивидуально в разделе «Сотрудники».'
+            )}
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>
+                  Тарифы и смена по умолчанию
+                </Typography>
+                <Grid container spacing={2}>
+              <Grid item xs={12} md={4}>
+                <TextField fullWidth type="number" label="Процент за приемку" value={settings.employees.defaultIntakeRate} onChange={(event) => setCategoryValue('employees', 'defaultIntakeRate', Number(event.target.value) || 0)} />
               </Grid>
               <Grid item xs={12} md={4}>
-                <TextField fullWidth label="Имя" value={settings.profile.name} onChange={(event) => setCategoryValue('profile', 'name', event.target.value)} />
+                <TextField fullWidth type="number" label="Процент за исполнение" value={settings.employees.defaultExecutionRate} onChange={(event) => setCategoryValue('employees', 'defaultExecutionRate', Number(event.target.value) || 0)} />
               </Grid>
-            <Grid item xs={12} md={4}>
-              <TextField fullWidth label="Email" value={settings.profile.email} onChange={(event) => setCategoryValue('profile', 'email', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <TextField fullWidth label="Телефон" value={settings.profile.phone} onChange={(event) => setCategoryValue('profile', 'phone', event.target.value)} />
-            </Grid>
-          </Grid>
+              <Grid item xs={12} md={4}>
+                <TextField fullWidth type="number" label="Процент за выдачу" value={settings.employees.defaultDeliveryRate} onChange={(event) => setCategoryValue('employees', 'defaultDeliveryRate', Number(event.target.value) || 0)} />
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <TextField fullWidth type="time" label="Начало рабочего дня" value={settings.employees.defaultWorkStartTime} onChange={(event) => setCategoryValue('employees', 'defaultWorkStartTime', event.target.value)} InputLabelProps={{ shrink: true }} />
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <TextField fullWidth type="time" label="Конец рабочего дня" value={settings.employees.defaultWorkEndTime} onChange={(event) => setCategoryValue('employees', 'defaultWorkEndTime', event.target.value)} InputLabelProps={{ shrink: true }} />
+              </Grid>
+              <Grid item xs={12}>
+                <Typography variant="body2" color="text.secondary">
+                  Индивидуальные проценты задаются в разделе «Сотрудники» на странице сотрудников.
+                </Typography>
+              </Grid>
+                </Grid>
+              </CardContent>
+            </Card>
+            <Alert severity="info">
+              Индивидуальные права доступа (разделы CRM, разделы настроек в «Мой профиль», редактирование аватара и телефона) настраиваются в карточке каждого сотрудника.
+            </Alert>
+          </Stack>
         );
+      case 'profile':
+        return null;
       case 'documents':
         return renderDocumentsSection();
       case 'integrations':
       case 'sms':
         return (
-          <Grid container spacing={2}>
+          <Stack spacing={2.5}>
+            {renderSectionIntro(
+              'Сначала подключите SMS-провайдера, затем настройте тексты и включите отправку по статусам заказа.'
+            )}
+            <SmsProviderSetup
+              settings={settings}
+              onChange={setSettings}
+              onSave={appSettingsService.saveSettings.bind(appSettingsService)}
+            />
+
+            {settings.integrations.smsConnected && settings.integrations.smsProvider !== 'none' ? (
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Тексты SMS по статусам</Typography>
+                <Grid container spacing={2}>
             <Grid item xs={12}>
-              <Alert severity="info">
-                Здесь настраиваются SMS, открытие WhatsApp/Telegram и телефония. Для внешних сервисов можно использовать свой URL-шаблон.
-              </Alert>
-            </Grid>
-            <Grid item xs={12}>
-              <Typography variant="h6" fontWeight={800}>SMS</Typography>
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <FormControl fullWidth>
-                <InputLabel>SMS провайдер</InputLabel>
-                <Select value={settings.integrations.smsProvider} label="SMS провайдер" onChange={(event) => setCategoryValue('integrations', 'smsProvider', event.target.value)}>
-                  <MenuItem value="none">Не подключен</MenuItem>
-                  <MenuItem value="webhook">Webhook / backend</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <FormControl fullWidth>
-                <InputLabel>Метод webhook</InputLabel>
-                <Select value={settings.integrations.smsWebhookMethod} label="Метод webhook" onChange={(event) => setCategoryValue('integrations', 'smsWebhookMethod', event.target.value)}>
-                  <MenuItem value="POST">POST</MenuItem>
-                  <MenuItem value="GET">GET</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <TextField fullWidth label="Имя отправителя" value={settings.integrations.smsSenderName} onChange={(event) => setCategoryValue('integrations', 'smsSenderName', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={8}>
-              <TextField fullWidth label="Webhook URL" value={settings.integrations.smsWebhookUrl} onChange={(event) => setCategoryValue('integrations', 'smsWebhookUrl', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <TextField fullWidth label="API токен" value={settings.integrations.smsApiToken} onChange={(event) => setCategoryValue('integrations', 'smsApiToken', event.target.value)} />
+              <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1}>
+                <Typography variant="body2" color="text.secondary">
+                  Включите «SMS уведомления» в разделе «Уведомления», если ещё не включены.
+                </Typography>
+                <Switch
+                  checked={Boolean(settings.notifications.smsNotifications)}
+                  onChange={(event) => setCategoryValue('notifications', 'smsNotifications', event.target.checked)}
+                />
+              </Stack>
             </Grid>
             <Grid item xs={12} md={4}>
               <FormControl fullWidth>
@@ -1304,21 +2373,29 @@ const Settings: React.FC = () => {
               </Alert>
             </Grid>
             <Grid item xs={12}>
-              <TinyMceEditor
+              <TextField
+                inputRef={smsTextareaRef}
+                fullWidth
+                multiline
+                minRows={5}
                 value={settings.integrations.smsStatusTemplates[selectedSmsStatusTemplate] || ''}
-                onChange={(nextValue) =>
+                onChange={(event) =>
                   setNestedCategoryValue(
                     'integrations',
                     'smsStatusTemplates',
                     selectedSmsStatusTemplate,
-                    nextValue
+                    event.target.value
                   )
                 }
-                onReady={(editor) => {
-                  smsEditorRef.current = editor;
+                placeholder="Здравствуйте, {{ФИОКлиента}}. Ваш заказ {{НомерЗаказа}} готов..."
+                helperText="Переменная {{telegramBotLink}} — персональная ссылка t.me для клиента. Вставьте в шаблон — подставится только при отправке. Лучше поставить в конец текста с новой строки."
+                sx={{
+                  '& .MuiInputBase-input': {
+                    fontFamily: 'inherit',
+                    lineHeight: 1.6,
+                    whiteSpace: 'pre-wrap',
+                  },
                 }}
-                outputFormat="text"
-                height={280}
               />
             </Grid>
             <Grid item xs={12}>
@@ -1335,42 +2412,57 @@ const Settings: React.FC = () => {
                       <Chip
                         key={`${group.title}-${item.token}`}
                         label={item.label}
+                        size="small"
                         variant="outlined"
                         onClick={() => handleInsertSmsVariable(item.token)}
+                        sx={variableChipSx}
                       />
                     ))}
                   </Stack>
                 ))}
               </Stack>
             </Grid>
+            <Grid item xs={12}>
+              <Divider sx={{ my: 1 }} />
+              <Typography variant="subtitle1" fontWeight={800} sx={{ mb: 1.5 }}>
+                Отправка по статусам
+              </Typography>
+              <Grid container spacing={1.5}>
+                {orderStatusOptions.map((status) => (
+                  <Grid item xs={12} md={6} key={`sms-trigger-integrations-${status.code}`}>
+                    <Box sx={{ px: 2, py: 1.5, border: `1px solid ${'var(--crm-border)'}`, borderRadius: 2 }}>
+                      <Stack direction="row" alignItems="center" justifyContent="space-between">
+                        <Typography fontWeight={700}>{status.label}</Typography>
+                        <Switch
+                          checked={Boolean(settings.notifications.smsStatusTriggers[status.code])}
+                          onChange={(event) => handleSmsTriggerChange(status.code, event.target.checked)}
+                        />
+                      </Stack>
+                    </Box>
+                  </Grid>
+                ))}
+              </Grid>
+            </Grid>
 
-            <Grid item xs={12}>
-              <Divider />
-            </Grid>
-            <Grid item xs={12}>
-              <Typography variant="h6" fontWeight={800}>WhatsApp</Typography>
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <FormControl fullWidth>
-                <InputLabel>Режим WhatsApp</InputLabel>
-                <Select value={settings.integrations.whatsappMode} label="Режим WhatsApp" onChange={(event) => setCategoryValue('integrations', 'whatsappMode', event.target.value)}>
-                  <MenuItem value="crm">Только окно CRM</MenuItem>
-                  <MenuItem value="crm_and_link">CRM + внешняя ссылка</MenuItem>
-                  <MenuItem value="link_only">Только внешняя ссылка</MenuItem>
-                  <MenuItem value="custom">Кастомный шаблон</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12} md={8}>
-              <TextField fullWidth label="Шаблон ссылки WhatsApp" value={settings.integrations.whatsappLinkTemplate} onChange={(event) => setCategoryValue('integrations', 'whatsappLinkTemplate', event.target.value)} helperText="Переменные: {{phone}}, {{phoneDigits}}, {{message}}, {{messageEncoded}}, {{clientName}}, {{orderNumber}}" />
-            </Grid>
+                </Grid>
+              </CardContent>
+            </Card>
+            ) : (
+              <Alert severity="info">
+                После подключения SMS-провайдера здесь появятся шаблоны сообщений и переключатели отправки по статусам.
+              </Alert>
+            )}
 
-            <Grid item xs={12}>
-              <Divider />
-            </Grid>
-            <Grid item xs={12}>
-              <Typography variant="h6" fontWeight={800}>Telegram</Typography>
-            </Grid>
+            <TelegramProviderSetup
+              settings={settings}
+              onChange={setSettings}
+              onSave={appSettingsService.saveSettings.bind(appSettingsService)}
+            />
+
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Telegram — режим ссылки</Typography>
+                <Grid container spacing={2}>
             <Grid item xs={12} md={4}>
               <FormControl fullWidth>
                 <InputLabel>Режим Telegram</InputLabel>
@@ -1383,15 +2475,16 @@ const Settings: React.FC = () => {
               </FormControl>
             </Grid>
             <Grid item xs={12} md={8}>
-              <TextField fullWidth label="Шаблон ссылки Telegram" value={settings.integrations.telegramLinkTemplate} onChange={(event) => setCategoryValue('integrations', 'telegramLinkTemplate', event.target.value)} helperText="Переменные: {{messageEncoded}}, {{siteUrl}}, {{siteUrlEncoded}}, {{orderNumber}}" />
+              <TextField fullWidth label="Шаблон ссылки Telegram" value={settings.integrations.telegramLinkTemplate} onChange={(event) => setCategoryValue('integrations', 'telegramLinkTemplate', event.target.value)} helperText="Переменные: {{telegramBotLink}}, {{telegramStartParam}}, {{messageEncoded}}, {{siteUrl}}, {{siteUrlEncoded}}, {{НомерЗаказа}}" />
             </Grid>
+                </Grid>
+              </CardContent>
+            </Card>
 
-            <Grid item xs={12}>
-              <Divider />
-            </Grid>
-            <Grid item xs={12}>
-              <Typography variant="h6" fontWeight={800}>Звонок</Typography>
-            </Grid>
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Звонок</Typography>
+                <Grid container spacing={2}>
             <Grid item xs={12} md={4}>
               <FormControl fullWidth>
                 <InputLabel>Режим звонка</InputLabel>
@@ -1404,95 +2497,191 @@ const Settings: React.FC = () => {
             <Grid item xs={12} md={8}>
               <TextField fullWidth label="Шаблон звонка" value={settings.integrations.callLinkTemplate} onChange={(event) => setCategoryValue('integrations', 'callLinkTemplate', event.target.value)} helperText="Примеры: tel:{{phone}} или deep link сервиса телефонии. Переменные: {{phone}}, {{phoneDigits}}" />
             </Grid>
-          </Grid>
+                </Grid>
+              </CardContent>
+            </Card>
+          </Stack>
         );
       case 'license':
         return (
-          <Grid container spacing={2}>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Текущий план" value={settings.license.plan} onChange={(event) => setCategoryValue('license', 'plan', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Лицензионный ключ" value={settings.license.key} onChange={(event) => setCategoryValue('license', 'key', event.target.value)} />
-            </Grid>
-            <Grid item xs={12}>
-              <Alert severity="info">Здесь можно хранить параметры лицензии и данные доступа.</Alert>
-            </Grid>
-          </Grid>
+          <Stack spacing={2.5}>
+            {renderSectionIntro('Текущая подписка организации и оплата доступа к CRM.')}
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Stack spacing={2}>
+                  <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" spacing={1.5}>
+                    <Box>
+                      <Typography variant="overline" color="text.secondary">
+                        {subscriptionSummary.title}
+                      </Typography>
+                      <Typography variant="h5" fontWeight={800}>
+                        {subscriptionSummary.planName}
+                      </Typography>
+                    </Box>
+                    <Chip
+                      label={subscriptionSummary.statusHint}
+                      color={
+                        subscriptionSummary.severity === 'success'
+                          ? 'success'
+                          : subscriptionSummary.severity === 'warning'
+                            ? 'warning'
+                            : subscriptionSummary.severity === 'error'
+                              ? 'error'
+                              : 'info'
+                      }
+                    />
+                  </Stack>
+                  {subscriptionSummary.endsAtLabel ? (
+                    <Alert severity={subscriptionSummary.severity}>
+                      Подписка действует до <strong>{subscriptionSummary.endsAtLabel}</strong>
+                      {subscriptionSummary.daysRemaining != null
+                        ? ` (осталось ${formatDaysRemaining(subscriptionSummary.daysRemaining)})`
+                        : ''}
+                      .
+                    </Alert>
+                  ) : (
+                    <Alert severity="info">{subscriptionSummary.statusHint}</Alert>
+                  )}
+                  {subscriptionSummary.canPay ? (
+                    <SubscriptionPlanPicker
+                      billingEnabled={billingEnabled}
+                      isLoading={billingLoading}
+                      monthlyPrice={monthlyPrice}
+                      compact
+                      payButtonLabel="Оплатить подписку"
+                    />
+                  ) : (
+                    <Alert severity="error">Для возобновления доступа свяжитесь с поддержкой платформы.</Alert>
+                  )}
+                </Stack>
+              </CardContent>
+            </Card>
+          </Stack>
         );
       case 'orders':
         return (
-          <Grid container spacing={2}>
-            <Grid item xs={12} md={4}>
-              <FormControl fullWidth>
-                <InputLabel>Приоритет по умолчанию</InputLabel>
-                <Select value={settings.orders.defaultPriority} label="Приоритет по умолчанию" onChange={(event) => setCategoryValue('orders', 'defaultPriority', event.target.value)}>
-                  <MenuItem value="low">Низкий</MenuItem>
-                  <MenuItem value="medium">Средний</MenuItem>
-                  <MenuItem value="high">Высокий</MenuItem>
-                  <MenuItem value="urgent">Срочный</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <FormControl fullWidth>
-                <InputLabel>Формат создания заказа</InputLabel>
-                <Select
-                  value={settings.orders.createMode}
-                  label="Формат создания заказа"
-                  onChange={(event) => setCategoryValue('orders', 'createMode', event.target.value)}
-                >
-                  <MenuItem value="step">Пошагово</MenuItem>
-                  <MenuItem value="single">Одна форма целиком</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12} md={8}>
-              <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ minHeight: 56, px: 2, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-                <Box>
-                  <Typography fontWeight={700}>Автоматически открывать акт выполненных работ после оплаты</Typography>
-                  <Typography variant="body2" color="text.secondary">Используется в финальном сценарии выдачи заказа.</Typography>
-                </Box>
-                <Switch checked={settings.orders.autoOpenCompletionAfterPayment} onChange={(event) => setCategoryValue('orders', 'autoOpenCompletionAfterPayment', event.target.checked)} />
-              </Stack>
-            </Grid>
-            <Grid item xs={12}>
-              <Alert severity="info">
-                Администратор сам выбирает сценарий создания заказа: пошаговый мастер или одна полная форма. Поля формы дополнительно управляются в разделах «Поля заказа» и «Поля клиента».
-              </Alert>
-            </Grid>
-          </Grid>
+          <Stack spacing={2.5}>
+            {renderSectionIntro(
+              'Базовые параметры оформления заказов. Дополнительные поля клиента настраиваются в разделе «Поля клиента».'
+            )}
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Grid container spacing={2}>
+                  <Grid item xs={12} md={4}>
+                    <FormControl fullWidth>
+                      <InputLabel>Приоритет по умолчанию</InputLabel>
+                      <Select value={settings.orders.defaultPriority} label="Приоритет по умолчанию" onChange={(event) => setCategoryValue('orders', 'defaultPriority', event.target.value)}>
+                        <MenuItem value="low">Низкий</MenuItem>
+                        <MenuItem value="medium">Средний</MenuItem>
+                        <MenuItem value="high">Высокий</MenuItem>
+                        <MenuItem value="urgent">Срочный</MenuItem>
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid item xs={12} md={4}>
+                    <FormControl fullWidth>
+                      <InputLabel>Формат создания заказа</InputLabel>
+                      <Select
+                        value={settings.orders.createMode}
+                        label="Формат создания заказа"
+                        onChange={(event) => setCategoryValue('orders', 'createMode', event.target.value)}
+                      >
+                        <MenuItem value="step">Пошагово</MenuItem>
+                        <MenuItem value="single">Одна форма целиком</MenuItem>
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid item xs={12}>
+                    <Stack
+                      direction="row"
+                      alignItems="center"
+                      justifyContent="space-between"
+                      sx={{ minHeight: 56, px: 2, py: 1, border: `1px solid ${'var(--crm-border)'}`, borderRadius: 2, bgcolor: 'background.paper' }}
+                    >
+                      <Box>
+                        <Typography fontWeight={700}>Автоматически открывать акт выполненных работ после оплаты</Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          Используется в финальном сценарии выдачи заказа.
+                        </Typography>
+                      </Box>
+                      <Switch
+                        checked={settings.orders.autoOpenCompletionAfterPayment}
+                        onChange={(event) => setCategoryValue('orders', 'autoOpenCompletionAfterPayment', event.target.checked)}
+                      />
+                    </Stack>
+                  </Grid>
+                </Grid>
+              </CardContent>
+            </Card>
+          </Stack>
+        );
+      case 'quickSales':
+        return (
+          <Stack spacing={2.5}>
+            {renderSectionIntro(
+              'Настройте кнопки быстрых продаж на странице заказов: название, цвет, товар и цена по умолчанию.'
+            )}
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <QuickSaleButtonsEditor
+                  options={settings.orders.quickSaleOptions}
+                  onChange={(quickSaleOptions) => setCategoryValue('orders', 'quickSaleOptions', quickSaleOptions)}
+                />
+              </CardContent>
+            </Card>
+          </Stack>
         );
       case 'statuses':
         return (
-          <Grid container spacing={2}>
-            <Grid item xs={12}>
-              <Alert severity="info">
-                Только эти статусы используются в заказах. Здесь можно добавить статус, убрать, отключить, отметить как финальный и назначить ему цвет.
-              </Alert>
-            </Grid>
-            <Grid item xs={12} md={8}>
-              <TextField fullWidth label="Новый статус" value={newStatusName} onChange={(event) => setNewStatusName(event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <Button variant="contained" startIcon={<Add />} fullWidth onClick={handleAddOrderStatus}>Добавить статус</Button>
-            </Grid>
+          <Stack spacing={2.5}>
+            {renderSectionIntro(
+              'Статусы заказов в CRM: добавление, отключение, финальные статусы и цвета в списке заказов.'
+            )}
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+              <TextField
+                fullWidth
+                label="Новый статус"
+                value={newStatusName}
+                onChange={(event) => setNewStatusName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    handleAddOrderStatus();
+                  }
+                }}
+              />
+              <Button variant="contained" startIcon={<Add />} onClick={handleAddOrderStatus} sx={{ flexShrink: 0 }}>
+                Добавить статус
+              </Button>
+            </Stack>
+            <Stack spacing={1.5}>
+            {orderStatusOptions.length === 0 && (
+              <Alert severity="info">Статусов пока нет. Добавьте первый — например «Принят» или «В работе».</Alert>
+            )}
             {orderStatusOptions.map((status) => (
-              <Grid item xs={12} key={status.id}>
-                <Card variant="outlined">
+                <Card key={status.id} sx={panelCardSx}>
                   <CardContent>
-                    <Grid container spacing={2} alignItems="center">
-                      <Grid item xs={12} md={4}>
-                        <TextField fullWidth label="Название статуса" value={status.label} onChange={(event) => handleUpdateOrderStatus(status.id, { label: event.target.value })} />
+                    {isSystemNewOrderStatus(status) ? (
+                      <Grid container spacing={2} alignItems="center">
+                        <Grid item xs={12} md={8}>
+                          <Typography fontWeight={800}>{status.label}</Typography>
+                          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                            Базовый статус для новых заказов. Можно изменить только цвет.
+                          </Typography>
+                        </Grid>
+                        <Grid item xs={12} md={4}>
+                          <TextField
+                            type="color"
+                            fullWidth
+                            label="Цвет"
+                            value={status.color}
+                            onChange={(event) => handleUpdateOrderStatus(status.id, { color: event.target.value })}
+                          />
+                        </Grid>
                       </Grid>
-                      <Grid item xs={12} md={3}>
-                        <TextField
-                          fullWidth
-                          label="Код"
-                          value={status.code}
-                          onChange={(event) => handleUpdateOrderStatus(status.id, { code: normalizeStatusCode(event.target.value) || status.code })}
-                          helperText="Служебный код CRM"
-                        />
+                    ) : (
+                    <Grid container spacing={2} alignItems="center">
+                      <Grid item xs={12} md={5}>
+                        <TextField fullWidth label="Название статуса" value={status.label} onChange={(event) => handleUpdateOrderStatus(status.id, { label: event.target.value })} />
                       </Grid>
                       <Grid item xs={12} md={2}>
                         <TextField type="color" fullWidth label="Цвет" value={status.color} onChange={(event) => handleUpdateOrderStatus(status.id, { color: event.target.value })} />
@@ -1515,58 +2704,55 @@ const Settings: React.FC = () => {
                         </IconButton>
                       </Grid>
                     </Grid>
+                    )}
                   </CardContent>
                 </Card>
-              </Grid>
             ))}
-          </Grid>
+            </Stack>
+          </Stack>
         );
         case 'notifications':
+        case 'email':
           return (
-            <Stack spacing={1.5}>
-              {[
-                ['emailNotifications', 'Email уведомления'],
-                ['smsNotifications', 'SMS уведомления'],
-              ['pushNotifications', 'Push уведомления'],
-              ['orderUpdates', 'Обновления по заказам'],
-              ['paymentReminders', 'Напоминания по оплате'],
-                ['lowStockAlerts', 'Низкий остаток запчастей'],
-                ['smsOnReadyStatus', 'SMS при статусе Готов'],
-              ].map(([key, label]) => (
-              <Card key={key} variant="outlined">
+            <Stack spacing={2}>
+              {renderSectionIntro(
+                'SMS-клиентам при смене статуса заказа. Тексты сообщений настраиваются в разделе «Интеграции и SMS».'
+              )}
+              <Card sx={panelCardSx}>
                 <CardContent sx={{ py: 1.5 }}>
                   <Stack direction="row" alignItems="center" justifyContent="space-between">
-                    <Typography fontWeight={700}>{label}</Typography>
-                    <Switch checked={Boolean(settings.notifications[key as keyof AppSettings['notifications']])} onChange={(event) => setCategoryValue('notifications', key as keyof AppSettings['notifications'], event.target.checked)} />
+                    <Box>
+                      <Typography fontWeight={700}>SMS уведомления</Typography>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                        Общий выключатель автоматической и ручной отправки SMS клиентам.
+                      </Typography>
+                    </Box>
+                    <Switch
+                      checked={Boolean(settings.notifications.smsNotifications)}
+                      onChange={(event) => setCategoryValue('notifications', 'smsNotifications', event.target.checked)}
+                    />
                   </Stack>
                 </CardContent>
-                </Card>
-              ))}
-              <Card variant="outlined">
+              </Card>
+              <Card sx={panelCardSx}>
                 <CardContent sx={{ py: 1.5 }}>
                   <Stack spacing={1.5}>
-                    <Typography fontWeight={800}>SMS-триггеры по статусам</Typography>
+                    <Typography fontWeight={800}>SMS по статусам заказа</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      При смене статуса CRM отправит SMS, если провайдер подключён и для статуса настроен текст.
+                    </Typography>
                     <Grid container spacing={1.5}>
                       {orderStatusOptions.map((status) => (
                         <Grid item xs={12} md={6} key={`sms-trigger-${status.code}`}>
-                          <Card variant="outlined">
-                            <CardContent sx={{ py: 1.5 }}>
+                          <Box sx={{ px: 2, py: 1.5, border: `1px solid ${'var(--crm-border)'}`, borderRadius: 2, bgcolor: 'background.paper' }}>
                               <Stack direction="row" alignItems="center" justifyContent="space-between">
                                 <Typography fontWeight={700}>{status.label}</Typography>
                                 <Switch
                                   checked={Boolean(settings.notifications.smsStatusTriggers[status.code])}
-                                  onChange={(event) =>
-                                    setNestedCategoryValue(
-                                      'notifications',
-                                      'smsStatusTriggers',
-                                      status.code,
-                                      event.target.checked
-                                    )
-                                  }
+                                  onChange={(event) => handleSmsTriggerChange(status.code, event.target.checked)}
                                 />
                               </Stack>
-                            </CardContent>
-                          </Card>
+                          </Box>
                         </Grid>
                       ))}
                     </Grid>
@@ -1575,69 +2761,151 @@ const Settings: React.FC = () => {
               </Card>
             </Stack>
           );
-      case 'email':
-        return <Alert severity="info">Письма клиентам будут использовать реквизиты компании и шаблоны уведомлений.</Alert>;
       case 'paymentCategories':
-        return <Alert severity="info">Статьи движения денег используются для учета операций в кассе.</Alert>;
+        return (
+          <Stack spacing={2}>
+            {renderSectionIntro(
+              'Статьи движения денег используются в кассе при оформлении приходов и расходов. Изменения сразу доступны в разделе «Касса».'
+            )}
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+              <TextField
+                fullWidth
+                label="Новая статья"
+                value={newCashCategory}
+                onChange={(event) => setNewCashCategory(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    void handleAddCashCategory();
+                  }
+                }}
+              />
+              <Button variant="contained" startIcon={<Add />} onClick={() => void handleAddCashCategory()} sx={{ flexShrink: 0 }}>
+                Добавить
+              </Button>
+            </Stack>
+            <Stack spacing={1.5}>
+              {cashCategories.length === 0 && (
+                <Alert severity="info">Пока нет статей. Добавьте первую — например «Ремонт» или «Продажи».</Alert>
+              )}
+              {cashCategories.map((category) => (
+                <Card key={category.id} sx={panelCardSx}>
+                  <CardContent sx={{ py: 1.5 }}>
+                    {editingCashCategoryId === category.id ? (
+                      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }}>
+                        <TextField
+                          fullWidth
+                          size="small"
+                          label="Название статьи"
+                          value={editingCashCategoryName}
+                          onChange={(event) => setEditingCashCategoryName(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              void handleSaveCashCategory(category.id);
+                            }
+                          }}
+                        />
+                        <Button variant="contained" onClick={() => void handleSaveCashCategory(category.id)}>
+                          Сохранить
+                        </Button>
+                        <Button
+                          variant="text"
+                          onClick={() => {
+                            setEditingCashCategoryId(null);
+                            setEditingCashCategoryName('');
+                          }}
+                        >
+                          Отмена
+                        </Button>
+                      </Stack>
+                    ) : (
+                      <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2}>
+                        <Box>
+                          <Typography fontWeight={700}>{category.name}</Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Используется в операциях кассы.
+                          </Typography>
+                        </Box>
+                        <Stack direction="row" spacing={1}>
+                          <Button
+                            variant="outlined"
+                            onClick={() => {
+                              setEditingCashCategoryId(category.id);
+                              setEditingCashCategoryName(category.name);
+                            }}
+                          >
+                            Изменить
+                          </Button>
+                          <Button color="error" onClick={() => void handleRemoveCashCategory(category.id)}>
+                            Удалить
+                          </Button>
+                        </Stack>
+                      </Stack>
+                    )}
+                  </CardContent>
+                </Card>
+              ))}
+            </Stack>
+          </Stack>
+        );
       case 'paymentMethods':
         return (
-          <Grid container spacing={2}>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Название кассы" value={settings.payment.cashRegisterName} onChange={(event) => setCategoryValue('payment', 'cashRegisterName', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Название терминала" value={settings.payment.terminalName} onChange={(event) => setCategoryValue('payment', 'terminalName', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <FormControl fullWidth>
-                <InputLabel>Валюта</InputLabel>
-                <Select value={settings.payment.currency} label="Валюта" onChange={(event) => setCategoryValue('payment', 'currency', event.target.value)}>
-                  <MenuItem value="RUB">Рубль (₽)</MenuItem>
-                  <MenuItem value="USD">Доллар ($)</MenuItem>
-                  <MenuItem value="EUR">Евро (€)</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-              <Grid item xs={12} md={4}>
-                <TextField fullWidth type="number" label="Налог, %" value={settings.payment.taxRate} onChange={(event) => setCategoryValue('payment', 'taxRate', Number(event.target.value) || 0)} />
-              </Grid>
-              <Grid item xs={12}>
-                <Alert severity="info">Администратор может сам добавлять способы оплаты. Эти способы потом используются в кассе, заказах и быстрых продажах.</Alert>
-              </Grid>
-              <Grid item xs={12}>
-                <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5}>
-                  <TextField fullWidth label="Код способа оплаты" value={newPaymentMethod.code} onChange={(event) => setNewPaymentMethod((prev) => ({ ...prev, code: event.target.value }))} />
-                  <TextField fullWidth label="Название для сотрудников" value={newPaymentMethod.label} onChange={(event) => setNewPaymentMethod((prev) => ({ ...prev, label: event.target.value }))} />
-                  <FormControl fullWidth>
-                    <InputLabel>Тип кассы</InputLabel>
-                    <Select value={newPaymentMethod.registerType} label="Тип кассы" onChange={(event) => setNewPaymentMethod((prev) => ({ ...prev, registerType: event.target.value as 'cashbox' | 'bank_terminal' | 'online' | 'mixed' }))}>
-                      <MenuItem value="cashbox">Наличные / касса</MenuItem>
-                      <MenuItem value="bank_terminal">Терминал</MenuItem>
-                      <MenuItem value="online">Онлайн / перевод</MenuItem>
-                      <MenuItem value="mixed">Смешанный</MenuItem>
-                    </Select>
-                  </FormControl>
-                  <Button variant="contained" startIcon={<Add />} onClick={handleAddPaymentMethod}>Добавить</Button>
+          <Stack spacing={2.5}>
+            {renderSectionIntro(
+              'Способы оплаты для кассы, заказов и быстрых продаж. Статьи движения денег настраиваются в «Категории платежей».'
+            )}
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>
+                  Валюта
+                </Typography>
+                <Grid container spacing={2}>
+                  <Grid item xs={12} md={4}>
+                    <FormControl fullWidth>
+                      <InputLabel>Валюта</InputLabel>
+                      <Select value={settings.payment.currency} label="Валюта" onChange={(event) => setCategoryValue('payment', 'currency', event.target.value)}>
+                        {CURRENCY_OPTIONS.map((currency) => (
+                          <MenuItem key={currency.code} value={currency.code}>
+                            {currency.label}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid item xs={12} md={4}>
+                    <TextField fullWidth type="number" label="Налог, %" value={settings.payment.taxRate} onChange={(event) => setCategoryValue('payment', 'taxRate', Number(event.target.value) || 0)} />
+                  </Grid>
+                </Grid>
+              </CardContent>
+            </Card>
+            <Card sx={panelCardSx}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>
+                  Способы оплаты
+                </Typography>
+                <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{ mb: 2 }}>
+                  <TextField
+                    fullWidth
+                    label="Название способа оплаты"
+                    value={newPaymentMethodLabel}
+                    onChange={(event) => setNewPaymentMethodLabel(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        handleAddPaymentMethod();
+                      }
+                    }}
+                  />
+                  <Button variant="contained" startIcon={<Add />} onClick={handleAddPaymentMethod} sx={{ flexShrink: 0 }}>
+                    Добавить
+                  </Button>
                 </Stack>
-              </Grid>
-              <Grid item xs={12}>
                 <Stack spacing={1.25}>
+                  {settings.payment.paymentMethodOptions.length === 0 && (
+                    <Alert severity="info">Способов оплаты пока нет. Добавьте наличные, терминал или перевод.</Alert>
+                  )}
                   {settings.payment.paymentMethodOptions.map((method) => (
-                    <Card key={method.code} variant="outlined">
-                      <CardContent sx={{ py: 1.5 }}>
+                    <Box key={method.code} sx={{ p: 1.5, border: `1px solid ${'var(--crm-border)'}`, borderRadius: 2, bgcolor: 'background.paper' }}>
                         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', md: 'center' }}>
-                          <TextField
-                            size="small"
-                            label="Код"
-                            value={method.code}
-                            onChange={(event) =>
-                              setPaymentMethodOptions(
-                                settings.payment.paymentMethodOptions.map((item) =>
-                                  item.code === method.code ? { ...item, code: event.target.value.toLowerCase().replace(/\s+/g, '_') } : item
-                                )
-                              )
-                            }
-                          />
                           <TextField
                             size="small"
                             sx={{ flex: 1 }}
@@ -1651,25 +2919,6 @@ const Settings: React.FC = () => {
                               )
                             }
                           />
-                          <FormControl size="small" sx={{ minWidth: 180 }}>
-                            <InputLabel>Тип кассы</InputLabel>
-                            <Select
-                              value={method.registerType}
-                              label="Тип кассы"
-                              onChange={(event) =>
-                                setPaymentMethodOptions(
-                                  settings.payment.paymentMethodOptions.map((item) =>
-                                    item.code === method.code ? { ...item, registerType: event.target.value as 'cashbox' | 'bank_terminal' | 'online' | 'mixed' } : item
-                                  )
-                                )
-                              }
-                            >
-                              <MenuItem value="cashbox">Наличные / касса</MenuItem>
-                              <MenuItem value="bank_terminal">Терминал</MenuItem>
-                              <MenuItem value="online">Онлайн / перевод</MenuItem>
-                              <MenuItem value="mixed">Смешанный</MenuItem>
-                            </Select>
-                          </FormControl>
                           <Stack direction="row" alignItems="center" spacing={1}>
                             <Typography variant="body2" color="text.secondary">Включен</Typography>
                             <Switch
@@ -1692,172 +2941,41 @@ const Settings: React.FC = () => {
                             <DeleteOutline />
                           </IconButton>
                         </Stack>
-                      </CardContent>
-                    </Card>
+                    </Box>
                   ))}
                 </Stack>
-              </Grid>
-            </Grid>
-          );
-        case 'quickSales':
-          return (
-            <Stack spacing={2}>
-              <Alert severity="info">
-                Здесь можно настроить кнопки быстрых продаж на странице заказов: название, категорию склада и режим продажи.
-              </Alert>
-              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5}>
-                <TextField fullWidth label="Название кнопки" value={newQuickSale.label} onChange={(event) => setNewQuickSale((prev) => ({ ...prev, label: event.target.value }))} />
-                <FormControl fullWidth>
-                  <InputLabel>Категория склада</InputLabel>
-                  <Select
-                    value={newQuickSale.category}
-                    label="Категория склада"
-                    onChange={(event) => setNewQuickSale((prev) => ({ ...prev, category: event.target.value }))}
-                  >
-                    {inventoryCategoryOptions.map((category) => (
-                      <MenuItem key={category} value={category}>
-                        {category}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-                <FormControl fullWidth>
-                  <InputLabel>Режим продажи</InputLabel>
-                  <Select value={newQuickSale.saleMode} label="Режим продажи" onChange={(event) => setNewQuickSale((prev) => ({ ...prev, saleMode: event.target.value as 'single' | 'quantity' }))}>
-                    <MenuItem value="single">Одна штука</MenuItem>
-                    <MenuItem value="quantity">С выбором количества</MenuItem>
-                  </Select>
-                </FormControl>
-                <Button variant="contained" startIcon={<Add />} onClick={handleAddQuickSale}>Добавить</Button>
-              </Stack>
-              <Stack spacing={1.25}>
-                {settings.orders.quickSaleOptions.map((option) => (
-                  <Card key={option.id} variant="outlined">
-                    <CardContent sx={{ py: 1.5 }}>
-                      <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', md: 'center' }}>
-                        <TextField
-                          size="small"
-                          sx={{ flex: 1 }}
-                          label="Название кнопки"
-                          value={option.label}
-                          onChange={(event) =>
-                            setCategoryValue(
-                              'orders',
-                              'quickSaleOptions',
-                              settings.orders.quickSaleOptions.map((item) =>
-                                item.id === option.id ? { ...item, label: event.target.value } : item
-                              )
-                            )
-                          }
-                        />
-                        <FormControl size="small" sx={{ flex: 1 }}>
-                          <InputLabel>Категория склада</InputLabel>
-                          <Select
-                            value={option.category}
-                            label="Категория склада"
-                            onChange={(event) =>
-                              setCategoryValue(
-                                'orders',
-                                'quickSaleOptions',
-                                settings.orders.quickSaleOptions.map((item) =>
-                                  item.id === option.id ? { ...item, category: event.target.value } : item
-                                )
-                              )
-                            }
-                          >
-                            {inventoryCategoryOptions.map((category) => (
-                              <MenuItem key={category} value={category}>
-                                {category}
-                              </MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                        <FormControl size="small" sx={{ minWidth: 180 }}>
-                          <InputLabel>Режим</InputLabel>
-                          <Select
-                            value={option.saleMode}
-                            label="Режим"
-                            onChange={(event) =>
-                              setCategoryValue(
-                                'orders',
-                                'quickSaleOptions',
-                                settings.orders.quickSaleOptions.map((item) =>
-                                  item.id === option.id ? { ...item, saleMode: event.target.value as 'single' | 'quantity' } : item
-                                )
-                              )
-                            }
-                          >
-                            <MenuItem value="single">Одна штука</MenuItem>
-                            <MenuItem value="quantity">С количеством</MenuItem>
-                          </Select>
-                        </FormControl>
-                        <Stack direction="row" alignItems="center" spacing={1}>
-                          <Typography variant="body2" color="text.secondary">Показывать</Typography>
-                          <Switch
-                            checked={option.enabled}
-                            onChange={(event) =>
-                              setCategoryValue(
-                                'orders',
-                                'quickSaleOptions',
-                                settings.orders.quickSaleOptions.map((item) =>
-                                  item.id === option.id ? { ...item, enabled: event.target.checked } : item
-                                )
-                              )
-                            }
-                          />
-                        </Stack>
-                        <IconButton
-                          color="error"
-                          onClick={() =>
-                            setCategoryValue(
-                              'orders',
-                              'quickSaleOptions',
-                              settings.orders.quickSaleOptions
-                                .filter((item) => item.id !== option.id)
-                                .map((item, index) => ({ ...item, sortOrder: index + 1 }))
-                            )
-                          }
-                        >
-                          <DeleteOutline />
-                        </IconButton>
-                      </Stack>
-                    </CardContent>
-                  </Card>
-                ))}
-              </Stack>
-            </Stack>
-          );
-        case 'orderTypes':
-        return renderFormsEditor('orderTypes', {
-          hint: 'Добавляйте, отключайте и переименовывайте типы заказов. Эти типы используются в форме создания заказа.',
-        });
-      case 'orderFields':
-        return renderFormsEditor('orderFields', {
-          withRequired: true,
-          hint: 'Управление полями карточки заказа. Можно включать/отключать поле и отмечать его обязательным.',
-        });
-      case 'clientTypes':
-        return renderFormsEditor('clientTypes', {
-          hint: 'Типы клиентов используются в форме приема и помогают точнее вести клиентскую базу.',
-        });
+              </CardContent>
+            </Card>
+          </Stack>
+        );
       case 'clientFields':
         return renderFormsEditor('clientFields', {
           withRequired: true,
           hint: 'Поля клиента используются в форме создания заказа и в карточке клиента.',
-        });
-      case 'directories':
-        return renderFormsEditor('directories', {
-          hint: 'Справочники CRM. Здесь можно включать, отключать и переименовывать наборы данных.',
         });
       default:
         return null;
     }
   };
 
-  const activeSectionMeta = settingsSections.flatMap((group) => group.items).find((item) => item.key === activeSection);
+  const resolvedActiveSection: SettingsSectionKey =
+    activeSection === 'email' ? 'notifications' : activeSection === 'sms' ? 'integrations' : activeSection;
+
+  const activeSectionMeta = visibleSettingsGroups
+    .flatMap((group) => group.items)
+    .find((item) => item.key === resolvedActiveSection);
 
   const handleOpenSectionDialog = (sectionKey: SettingsSectionKey) => {
-    setActiveSection(sectionKey);
+    if (sectionKey === 'profile') {
+      navigate('/my-profile');
+      return;
+    }
+    if (!canAccessSettingsSection(user, sectionKey)) {
+      toast.error('У вас нет доступа к этому разделу настроек');
+      return;
+    }
+    const nextSection = resolveSettingsSectionKey(sectionKey);
+    setActiveSection(nextSection);
     setIsSectionDialogOpen(true);
   };
 
@@ -1871,75 +2989,124 @@ const Settings: React.FC = () => {
           Настройки платформы
         </Typography>
         <Typography sx={{ maxWidth: 760, color: 'rgba(255,255,255,0.78)' }}>
-          Единый центр настроек по компании, заказам, документам, уведомлениям, платежам и интеграциям.
+          {isAdmin
+            ? 'Единый центр настроек по компании, заказам, документам, уведомлениям, платежам и интеграциям.'
+            : 'Разделы настроек, которые администратор открыл для вашей учётной записи.'}
         </Typography>
       </Box>
 
       <Grid container spacing={3}>
-        <Grid item xs={12} md={3}>
-          <Card sx={panelCardSx}>
-            <CardContent>
-              <Typography variant="body2" color="text.secondary">Уведомлений включено</Typography>
-              <Typography variant="h4" sx={{ mt: 1, fontWeight: 800 }}>{enabledNotificationCount}</Typography>
-            </CardContent>
-          </Card>
+        <Grid item xs={12} sm={6} md={3}>
+          <SettingsStatCard
+            label="Уведомлений включено"
+            value={enabledNotificationCount}
+            caption={`из ${totalNotificationCount} каналов`}
+          />
         </Grid>
-        <Grid item xs={12} md={3}>
-          <Card sx={panelCardSx}>
-            <CardContent>
-              <Typography variant="body2" color="text.secondary">Локаций</Typography>
-              <Typography variant="h4" sx={{ mt: 1, fontWeight: 800 }}>{settings.locations.items.length}</Typography>
-            </CardContent>
-          </Card>
+        <Grid item xs={12} sm={6} md={3}>
+          <SettingsStatCard
+            label="Локаций"
+            value={locationsCount}
+            caption={locationsCount === 0 ? 'добавьте первую точку' : 'активных точек'}
+          />
         </Grid>
-        <Grid item xs={12} md={3}>
-          <Card sx={panelCardSx}>
-            <CardContent>
-              <Typography variant="body2" color="text.secondary">Способов оплаты</Typography>
-              <Typography variant="h4" sx={{ mt: 1, fontWeight: 800 }}>{settings.payment.paymentMethods.length + (settings.payment.installmentEnabled ? 1 : 0)}</Typography>
-            </CardContent>
-          </Card>
+        <Grid item xs={12} sm={6} md={3}>
+          <SettingsStatCard
+            label="Способов оплаты"
+            value={paymentMethodsCount}
+            caption={settings.payment.installmentEnabled ? 'включая рассрочку' : 'в заказах и кассе'}
+          />
         </Grid>
-        <Grid item xs={12} md={3}>
-          <Card sx={panelCardSx}>
-            <CardContent>
-              <Typography variant="body2" color="text.secondary">План</Typography>
-              <Typography variant="h5" sx={{ mt: 1, fontWeight: 800 }}>{settings.license.plan}</Typography>
-            </CardContent>
-          </Card>
+        <Grid item xs={12} sm={6} md={3}>
+          {isAdmin ? (
+            <SettingsStatCard
+              label="Подписка"
+              value={subscriptionStatValue}
+              caption={subscriptionStatCaption}
+              onClick={handleOpenSubscription}
+              disabled={!subscriptionSummary.canPay}
+            />
+          ) : (
+            <SettingsStatCard
+              label="Разделов настроек"
+              value={accessibleSettingsCount}
+              caption="доступно вам"
+            />
+          )}
         </Grid>
       </Grid>
 
-      <Card sx={{ ...panelCardSx, p: 0 }}>
-        <CardContent>
-          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', md: 'center' }} spacing={2}>
-            <Box>
-              <Typography variant="h4" fontWeight={800}>Настройки</Typography>
-              <Typography color="text.secondary" sx={{ mt: 0.75 }}>Разделы настроек вынесены в отдельный каталог, как в нормальной рабочей CRM.</Typography>
-            </Box>
-            <Button variant="outlined" startIcon={<HelpOutline />}>Справка</Button>
-          </Stack>
-        </CardContent>
-      </Card>
-
-      <Grid container spacing={3} alignItems="flex-start">
-        {settingsSections.map((group) => (
-          <Grid item xs={12} md={6} key={group.title}>
-            <Card sx={panelCardSx}>
-              <CardContent>
-                <Typography variant="h5" sx={{ mb: 1.5 }}>{group.title}</Typography>
-                <List disablePadding>
-                  {group.items.map((item, index) => (
-                      <React.Fragment key={item.key}>
-                        <ListItemButton selected={activeSection === item.key && isSectionDialogOpen} onClick={() => handleOpenSectionDialog(item.key as SettingsSectionKey)} sx={{ borderRadius: 2 }}>
-                          <ListItemIcon sx={{ minWidth: 40 }}>{item.icon}</ListItemIcon>
-                          <ListItemText primary={item.label} />
-                          {item.badge && <Chip size="small" label={item.badge} color="primary" />}
-                        </ListItemButton>
-                      {index < group.items.length - 1 && <Divider />}
-                    </React.Fragment>
+      <Grid container spacing={3} alignItems="stretch">
+        {visibleSettingsGroups.map((group) => (
+          <Grid item xs={12} lg={4} key={group.title} sx={{ display: 'flex' }}>
+            <Card sx={{ ...panelCardSx, flex: 1, display: 'flex', flexDirection: 'column' }}>
+              <CardContent sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                <Stack direction="row" spacing={1.5} alignItems="flex-start" sx={{ mb: 2 }}>
+                  <Box
+                    sx={{
+                      width: 44,
+                      height: 44,
+                      borderRadius: 2,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                      bgcolor: 'action.hover',
+                      color: 'primary.main',
+                    }}
+                  >
+                    {group.icon}
+                  </Box>
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="h6" fontWeight={800} sx={{ lineHeight: 1.25 }}>
+                      {group.title}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, lineHeight: 1.45 }}>
+                      {group.description}
+                    </Typography>
+                  </Box>
+                </Stack>
+                <Stack spacing={0.75} sx={{ flex: 1 }}>
+                  {group.items.map((item) => (
+                    <ListItemButton
+                      key={item.key}
+                      selected={resolvedActiveSection === item.key && isSectionDialogOpen}
+                      onClick={() => handleOpenSectionDialog(item.key as SettingsSectionKey)}
+                      sx={{
+                        borderRadius: 2,
+                        alignItems: 'center',
+                        py: 1.25,
+                        px: 1.5,
+                        border: '1px solid',
+                        borderColor: 'divider',
+                        '&.Mui-selected': {
+                          borderColor: 'primary.main',
+                          bgcolor: 'action.selected',
+                        },
+                        '&:hover': {
+                          borderColor: 'primary.light',
+                        },
+                      }}
+                    >
+                      <ListItemIcon
+                        sx={{
+                          minWidth: 36,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: 'text.secondary',
+                        }}
+                      >
+                        {item.icon}
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={item.label}
+                        primaryTypographyProps={{ sx: { fontWeight: 600, lineHeight: 1.35, fontSize: '0.95rem' } }}
+                      />
+                      {item.badge ? <Chip size="small" label={item.badge} color="primary" /> : null}
+                    </ListItemButton>
                   ))}
-                </List>
+                </Stack>
               </CardContent>
             </Card>
           </Grid>
@@ -1954,11 +3121,20 @@ const Settings: React.FC = () => {
           open={isSectionDialogOpen}
           onClose={() => setIsSectionDialogOpen(false)}
           fullWidth
-          maxWidth={activeSection === 'documents' || activeSection === 'sms' || activeSection === 'integrations' ? 'xl' : 'lg'}
+          disableScrollLock={activeSection === 'documents'}
+          maxWidth={activeSection === 'documents' ? false : activeSection === 'sms' || activeSection === 'integrations' ? 'xl' : 'lg'}
           PaperProps={{
             sx: {
               borderRadius: 3,
-              minHeight: activeSection === 'documents' ? '85vh' : undefined,
+              ...(activeSection === 'documents'
+                ? {
+                    display: 'flex',
+                    flexDirection: 'column',
+                    width: 'min(1560px, 96vw)',
+                    maxWidth: '96vw',
+                    maxHeight: '92vh',
+                  }
+                : {}),
             },
           }}
         >
@@ -1970,12 +3146,26 @@ const Settings: React.FC = () => {
                   Изменения сохраняются вручную и применяются после сохранения.
                 </Typography>
               </Box>
-              <Stack direction="row" spacing={1.5}>
-                <IconButton onClick={() => void handleReset()} disabled={isSaving}><Refresh /></IconButton>
-              </Stack>
             </Stack>
           </DialogTitle>
-          <DialogContent dividers sx={{ pt: 2 }}>
+          <DialogContent
+            dividers
+            sx={{
+              pt: 2,
+              overflowX: 'hidden',
+              overflowY: 'auto',
+              ...(activeSection === 'documents'
+                ? {
+                    flex: 1,
+                    minHeight: 0,
+                    bgcolor: 'var(--crm-bg)',
+                    pl: { xs: 2, md: 3 },
+                    pr: { xs: 3, md: 4 },
+                    pb: 2,
+                  }
+                : {}),
+            }}
+          >
             {renderSectionContent()}
           </DialogContent>
           <DialogActions sx={{ px: 3, py: 2 }}>
@@ -1983,6 +3173,34 @@ const Settings: React.FC = () => {
             <Button variant="contained" startIcon={<Save />} onClick={() => void handleSave()} disabled={isSaving}>
               Сохранить
             </Button>
+          </DialogActions>
+        </Dialog>
+
+        <Dialog open={isLocationPaymentOpen} onClose={() => setIsLocationPaymentOpen(false)} fullWidth maxWidth="md">
+          <DialogTitle>Оплата дополнительной локации</DialogTitle>
+          <DialogContent dividers>
+            <Stack spacing={2}>
+              <Alert severity="info">
+                {pendingLocationName ? (
+                  <>
+                    Локация <strong>{pendingLocationName}</strong> будет добавлена после успешной оплаты.
+                  </>
+                ) : (
+                  'Оплатите подписку, чтобы открыть ещё одну локацию.'
+                )}
+              </Alert>
+              <SubscriptionPlanPicker
+                billingEnabled={billingEnabled}
+                isLoading={billingLoading}
+                monthlyPrice={monthlyPrice}
+                paymentPurpose="location"
+                payButtonLabel="Оплатить локацию"
+                compact
+              />
+            </Stack>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setIsLocationPaymentOpen(false)}>Отмена</Button>
           </DialogActions>
         </Dialog>
       </Box>

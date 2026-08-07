@@ -1,13 +1,24 @@
 import { AppSettings, DocumentTemplate, OrderStatusSetting } from '../types';
+import {
+  SYSTEM_NEW_ORDER_STATUS_CODE,
+  SYSTEM_NEW_ORDER_STATUS_COLOR,
+  buildSystemNewOrderStatus,
+  isSystemNewOrderStatus,
+  matchesLegacyNewOrderStatus,
+} from '../constants/orderStatuses';
 import { apiService } from './api';
+import { isStoredUserAdmin } from './authService';
+import { DEFAULT_APPEARANCE, normalizeAppearance } from '../utils/crmAppearance';
+import { getStoredTenantId, tenantStorageKey } from '../utils/tenantStorage';
 import {
   getBuiltInDocumentTemplates as getFixedBuiltInDocumentTemplates,
   hasLegacyDocumentTemplates as hasLegacyDocumentTemplatesFixed,
   upgradeBuiltInDocumentTemplate as upgradeBuiltInTemplateFixed,
 } from './documentTemplateDefaults';
 
-const SETTINGS_STORAGE_KEY = 'nek_crm_app_settings';
-const SETTINGS_UPDATED_EVENT = 'crm:settings-updated';
+export const SETTINGS_UPDATED_EVENT = 'crm:settings-updated';
+
+const SETTINGS_STORAGE_BASE = 'nek_crm_app_settings';
 
 const hasBrokenEncoding = (value?: string) => {
   if (!value) {
@@ -59,6 +70,7 @@ const builtInTemplates = getFixedBuiltInDocumentTemplates();
 const getBuiltInTemplateById = (id?: string) => builtInTemplates.find((template) => template.id === id);
 
 export const defaultOrderStatuses: OrderStatusSetting[] = deepDecodeStrings([
+  buildSystemNewOrderStatus(),
   { id: 'status_diagnosis', code: 'diagnosis', label: 'Диагностика', color: '#3b82f6', enabled: true, isFinal: false, sortOrder: 1 },
   { id: 'status_waiting_parts', code: 'waiting_parts', label: 'Ожидание запчастей', color: '#f59e0b', enabled: true, isFinal: false, sortOrder: 2 },
   { id: 'status_waiting_client', code: 'waiting_client', label: 'Ожидание клиента', color: '#f59e0b', enabled: true, isFinal: false, sortOrder: 3 },
@@ -96,6 +108,57 @@ const legacyStatusKeyMap: Record<string, string> = {
   completed: 'completed',
   cancelled: 'cancelled',
   pending: 'pending',
+  new: 'pending',
+};
+
+/** camelCase-ключи SMS → коды статусов заказа (snake_case). */
+export const smsLegacyKeyMap: Record<string, string> = {
+  waitingParts: 'waiting_parts',
+  waitingClient: 'waiting_client',
+  inProgress: 'in_progress',
+};
+
+export const migrateSmsRecordKeys = <T>(record: Record<string, T>): Record<string, T> => {
+  const result = { ...record };
+  Object.entries(smsLegacyKeyMap).forEach(([legacy, modern]) => {
+    if (legacy in result) {
+      if (!(modern in result)) {
+        result[modern] = result[legacy];
+      }
+      delete result[legacy];
+    }
+  });
+  return result;
+};
+
+const ensureSystemNewOrderStatus = (statuses: OrderStatusSetting[]): OrderStatusSetting[] => {
+  const candidateIndex = statuses.findIndex(
+    (status) => isSystemNewOrderStatus(status) || matchesLegacyNewOrderStatus(status)
+  );
+
+  let systemStatus: OrderStatusSetting;
+  let rest: OrderStatusSetting[];
+
+  if (candidateIndex >= 0) {
+    const candidate = statuses[candidateIndex];
+    systemStatus = {
+      ...candidate,
+      ...buildSystemNewOrderStatus(candidate.color || SYSTEM_NEW_ORDER_STATUS_COLOR),
+      sortOrder: 0,
+    };
+    rest = statuses.filter((_, index) => index !== candidateIndex);
+  } else {
+    systemStatus = buildSystemNewOrderStatus();
+    rest = statuses;
+  }
+
+  return [
+    systemStatus,
+    ...rest.map((status, index) => ({
+      ...status,
+      sortOrder: index + 1,
+    })),
+  ];
 };
 
 const normalizeOrderStatuses = (statuses?: OrderStatusSetting[], legacy?: Partial<AppSettings['orders']>): OrderStatusSetting[] => {
@@ -116,19 +179,29 @@ const normalizeOrderStatuses = (statuses?: OrderStatusSetting[], legacy?: Partia
       color: status.color || defaultOrderStatuses.find((item) => item.code === status.code)?.color || '#6b7280',
       enabled: status.enabled !== false,
       isFinal: Boolean(status.isFinal),
+      isSystem: Boolean(status.isSystem),
       sortOrder: status.sortOrder ?? index + 1,
     }))
     .sort((a, b) => a.sortOrder - b.sortOrder);
 
-  return normalized.length > 0 ? normalized : structuredClone(defaultOrderStatuses);
+  const withSystemStatus = ensureSystemNewOrderStatus(normalized);
+  return withSystemStatus.length > 0 ? withSystemStatus : [buildSystemNewOrderStatus()];
 };
 
 export const getEnabledOrderStatuses = (settings: AppSettings) =>
   settings.orders.statuses.filter((status) => status.enabled).sort((a, b) => a.sortOrder - b.sortOrder);
 
-export const getOrderStatusDefinition = (statusCode: string, settings: AppSettings) =>
-  settings.orders.statuses.find((status) => status.code === statusCode) ||
-  defaultOrderStatuses.find((status) => status.code === statusCode) || {
+export const getOrderStatusDefinition = (statusCode: string, settings: AppSettings) => {
+  if (statusCode === 'pending' || statusCode === SYSTEM_NEW_ORDER_STATUS_CODE) {
+    const systemStatus = settings.orders.statuses.find((status) => isSystemNewOrderStatus(status));
+    if (systemStatus) {
+      return { ...systemStatus, code: statusCode };
+    }
+  }
+
+  return (
+    settings.orders.statuses.find((status) => status.code === statusCode) ||
+    defaultOrderStatuses.find((status) => status.code === statusCode) || {
     id: `status_${statusCode}`,
     code: statusCode,
     label: settings.orders.statusLabels[statusCode] || statusCode,
@@ -136,12 +209,23 @@ export const getOrderStatusDefinition = (statusCode: string, settings: AppSettin
     enabled: true,
     isFinal: false,
     sortOrder: 999,
-  };
+  });
+};
 
-export const getDefaultOpenOrderStatus = (settings: AppSettings) =>
-  getEnabledOrderStatuses(settings).find((status) => !status.isFinal)?.code ||
-  getEnabledOrderStatuses(settings)[0]?.code ||
-  'diagnosis';
+export const getDefaultOpenOrderStatus = (settings: AppSettings) => {
+  const enabled = getEnabledOrderStatuses(settings);
+  const systemNew = enabled.find((status) => isSystemNewOrderStatus(status));
+  if (systemNew) {
+    return systemNew.code;
+  }
+
+  return (
+    enabled.find((status) => status.code === SYSTEM_NEW_ORDER_STATUS_CODE)?.code ||
+    enabled.find((status) => !status.isFinal)?.code ||
+    enabled[0]?.code ||
+    SYSTEM_NEW_ORDER_STATUS_CODE
+  );
+};
 
 export const getReadyOrderStatus = (settings: AppSettings) =>
   getEnabledOrderStatuses(settings).find((status) => status.code === 'ready')?.code ||
@@ -196,6 +280,24 @@ const defaultSettings: AppSettings = deepDecodeStrings({
       { id: 'cf_comment', code: 'clientComment', label: 'Заметка по клиенту', enabled: true, required: false, sortOrder: 3 },
       { id: 'cf_discount', code: 'discount', label: 'Скидка', enabled: true, required: false, sortOrder: 4 },
       { id: 'cf_birthday', code: 'birthday', label: 'Дата рождения', enabled: true, required: false, sortOrder: 5 },
+      {
+        id: 'cf_inn',
+        code: 'inn',
+        label: 'ИНН',
+        enabled: true,
+        required: true,
+        sortOrder: 6,
+        clientTypes: ['company'],
+      },
+      {
+        id: 'cf_bank_account',
+        code: 'bankAccount',
+        label: 'Расчётный счёт',
+        enabled: true,
+        required: true,
+        sortOrder: 7,
+        clientTypes: ['company'],
+      },
     ],
     directories: [
       { id: 'dir_order_statuses', code: 'order_statuses', label: 'Статусы заказов', enabled: true, sortOrder: 1 },
@@ -208,12 +310,12 @@ const defaultSettings: AppSettings = deepDecodeStrings({
   },
   profile: {
     name: 'Администратор',
-    email: 'admin@nekservice.ru',
+    email: 'admin@example.com',
     phone: '+7 (999) 123-45-67',
     avatar: '',
   },
   locations: {
-    items: ['Основной сервис', 'Пункт приема'],
+    items: [],
   },
   employees: {
     defaultIntakeRate: 5,
@@ -225,64 +327,38 @@ const defaultSettings: AppSettings = deepDecodeStrings({
   employeeWork: {
     schedules: [],
     rosterEntries: [],
+    rosterHiddenEntries: [],
     tasks: [],
   },
   notifications: {
-    emailNotifications: true,
     smsNotifications: false,
-    pushNotifications: true,
-    orderUpdates: true,
-    paymentReminders: true,
-    lowStockAlerts: true,
-    smsOnReadyStatus: true,
     smsStatusTriggers: {
+      new: false,
       diagnosis: false,
-      waitingParts: false,
-      waitingClient: false,
-      inProgress: false,
+      waiting_parts: false,
+      waiting_client: false,
+      in_progress: false,
       ready: true,
       completed: false,
       cancelled: false,
     },
   },
   business: {
-    companyName: 'НЭК Сервис',
-    address: 'Екатеринбург, ул. Примерная, д. 1',
-    phone: '+7 (938) 309-18-77',
-    email: 'info@nekservice.ru',
+    companyName: '',
+    address: '',
+    phone: '',
+    email: '',
     workingHours: '10:00 - 19:00',
-    timezone: 'Asia/Yekaterinburg',
+    timezone: 'Europe/Moscow',
+    logoUrl: '',
   },
+  appearance: structuredClone(DEFAULT_APPEARANCE),
   orders: {
     defaultPriority: 'medium',
     autoOpenCompletionAfterPayment: true,
     createMode: 'step',
-    quickSaleOptions: [
-      {
-        id: 'quick_sale_screen_protection',
-        label: 'Защита экрана',
-        category: 'Защита экрана',
-        saleMode: 'single',
-        enabled: true,
-        sortOrder: 1,
-      },
-      {
-        id: 'quick_sale_accessory',
-        label: 'Продать аксессуар',
-        category: 'Аксессуары',
-        saleMode: 'quantity',
-        enabled: true,
-        sortOrder: 2,
-      },
-      {
-        id: 'quick_sale_product',
-        label: 'Продажа товара',
-        category: 'Товары',
-        saleMode: 'quantity',
-        enabled: true,
-        sortOrder: 3,
-      },
-    ],
+    warehouses: [],
+    quickSaleOptions: [],
     statuses: structuredClone(defaultOrderStatuses),
     statusLabels: buildStatusMaps(defaultOrderStatuses).labels,
     statusColors: buildStatusMaps(defaultOrderStatuses).colors,
@@ -292,7 +368,7 @@ const defaultSettings: AppSettings = deepDecodeStrings({
     completionActTitle: 'Акт выполненных работ',
     warrantyText:
       'Клиент согласен с тем, что использование устройства без защитного аксессуара лишает гарантии на экран и иные чувствительные элементы.',
-    footerDisclaimer: 'Документ сформирован в CRM НЭК Сервис.',
+    footerDisclaimer: 'Документ сформирован в CRM.',
     templates: builtInTemplates,
   },
   payment: {
@@ -315,28 +391,39 @@ const defaultSettings: AppSettings = deepDecodeStrings({
     dataRetention: 365,
     language: 'ru',
     theme: 'light',
+    onboardingCompleted: true,
   },
   integrations: {
     smsProvider: 'none',
+    smsConnected: false,
+    smsCredentials: {},
     smsWebhookUrl: '',
     smsApiToken: '',
-    smsSenderName: 'НЭК Сервис',
+    smsSenderName: '',
     smsWebhookMethod: 'POST',
     smsTemplateReady:
-      'Здравствуйте, {{clientName}}. Ваш заказ {{orderNumber}} готов к выдаче в {{companyName}}. Остаток к оплате: {{debt}} ₽. Телефон: {{companyPhone}}.',
+      'Здравствуйте, {{ФИОКлиента}}. Ваш заказ {{НомерЗаказа}} готов к выдаче в {{НазваниеКомпании}}. Остаток к оплате: {{Долг}} ₽. Telegram: {{telegramBotLink}} Телефон: {{ТелефонКомпании}}.',
     smsStatusTemplates: {
-      diagnosis: 'Здравствуйте, {{clientName}}. Заказ {{orderNumber}} принят в диагностику в {{companyName}}. Устройство: {{device}}. Телефон: {{companyPhone}}.',
-      waitingParts: 'Здравствуйте, {{clientName}}. По заказу {{orderNumber}} ожидаются запчасти. Как только они поступят, мы сообщим. {{companyName}}, {{companyPhone}}.',
-      waitingClient: 'Здравствуйте, {{clientName}}. По заказу {{orderNumber}} требуется ваше уточнение или действие. Свяжитесь с {{companyName}}: {{companyPhone}}.',
-      inProgress: 'Здравствуйте, {{clientName}}. Заказ {{orderNumber}} сейчас в работе. Устройство: {{device}}. {{companyName}}, {{companyPhone}}.',
-      ready: 'Здравствуйте, {{clientName}}. Ваш заказ {{orderNumber}} готов к выдаче в {{companyName}}. Остаток к оплате: {{debt}} ₽. Телефон: {{companyPhone}}.',
-      completed: 'Здравствуйте, {{clientName}}. Заказ {{orderNumber}} завершен. Спасибо, что выбрали {{companyName}}.',
-      cancelled: 'Здравствуйте, {{clientName}}. Заказ {{orderNumber}} отменен. Если нужна помощь, свяжитесь с {{companyName}}: {{companyPhone}}.',
+      diagnosis:
+        'Здравствуйте, {{ФИОКлиента}}. Заказ {{НомерЗаказа}} принят в диагностику в {{НазваниеКомпании}}. Устройство: {{Устройство}}. Телефон: {{ТелефонКомпании}}. Чат в Telegram: {{telegramBotLink}}',
+      waiting_parts:
+        'Здравствуйте, {{ФИОКлиента}}. По заказу {{НомерЗаказа}} ожидаются запчасти. Как только они поступят, мы сообщим. {{НазваниеКомпании}}, {{ТелефонКомпании}}. Чат в Telegram: {{telegramBotLink}}',
+      waiting_client:
+        'Здравствуйте, {{ФИОКлиента}}. По заказу {{НомерЗаказа}} требуется ваше уточнение или действие. Свяжитесь с {{НазваниеКомпании}}: {{ТелефонКомпании}}. Чат в Telegram: {{telegramBotLink}}',
+      in_progress:
+        'Здравствуйте, {{ФИОКлиента}}. Заказ {{НомерЗаказа}} сейчас в работе. Устройство: {{Устройство}}. {{НазваниеКомпании}}, {{ТелефонКомпании}}. Чат в Telegram: {{telegramBotLink}}',
+      ready:
+        'Здравствуйте, {{ФИОКлиента}}! Заказ {{НомерЗаказа}} готов к выдаче. Остаток: {{Долг}} ₽. {{НазваниеКомпании}}, {{ТелефонКомпании}}. {{telegramBotLink}}',
+      completed:
+        'Здравствуйте, {{ФИОКлиента}}. Заказ {{НомерЗаказа}} завершен. Спасибо, что выбрали {{НазваниеКомпании}}. Чат в Telegram: {{telegramBotLink}}',
+      cancelled:
+        'Здравствуйте, {{ФИОКлиента}}. Заказ {{НомерЗаказа}} отменен. Если нужна помощь, свяжитесь с {{НазваниеКомпании}}: {{ТелефонКомпании}}. Чат в Telegram: {{telegramBotLink}}',
     },
-    whatsappMode: 'crm_and_link',
-    whatsappLinkTemplate: 'https://wa.me/{{phoneDigits}}?text={{messageEncoded}}',
     telegramMode: 'crm',
     telegramLinkTemplate: 'https://t.me/share/url?url={{siteUrlEncoded}}&text={{messageEncoded}}',
+    telegramConnected: false,
+    telegramBotToken: '',
+    telegramBotUsername: '',
     callMode: 'tel',
     callLinkTemplate: 'tel:{{phone}}',
   },
@@ -344,22 +431,32 @@ const defaultSettings: AppSettings = deepDecodeStrings({
     plan: 'Базовый тариф',
     key: '',
   },
+  employeeAccess: {
+    visibleSections: [
+      'documents',
+      'business',
+      'locations',
+      'employees',
+      'integrations',
+      'orders',
+      'quickSales',
+      'statuses',
+      'notifications',
+      'paymentCategories',
+      'paymentMethods',
+      'clientFields',
+    ],
+    selfEditableFields: ['avatar', 'phone'],
+  },
 });
 
 const normalizeTemplate = (template: Partial<DocumentTemplate>, index: number): DocumentTemplate => ({
   id: template.id || `document_template_${index + 1}`,
-  name:
-    (hasBrokenEncoding(template.name)
-      ? getBuiltInTemplateById(template.id)?.name
-      : decodeMojibake(template.name)) || `Шаблон ${index + 1}`,
+  name: template.name || getBuiltInTemplateById(template.id)?.name || `Шаблон ${index + 1}`,
   type: template.type || getBuiltInTemplateById(template.id)?.type || 'custom',
   category: template.category || getBuiltInTemplateById(template.id)?.category || 'other',
-  description:
-    (hasBrokenEncoding(template.description)
-      ? getBuiltInTemplateById(template.id)?.description
-      : decodeMojibake(template.description)) || '',
-  template:
-    (hasBrokenEncoding(template.template) ? getBuiltInTemplateById(template.id)?.template : template.template) ||
+  description: template.description || '',
+  template: template.template ||
     getBuiltInTemplateById(template.id)?.template ||
     '',
   variables:
@@ -371,19 +468,22 @@ const normalizeTemplate = (template: Partial<DocumentTemplate>, index: number): 
   updatedAt: new Date(template.updatedAt || new Date()),
 });
 
-const upgradeLegacyTemplate = (template: DocumentTemplate): DocumentTemplate => {
-  const builtIn = getBuiltInTemplateById(template.id);
+const upgradeLegacyTemplate = (template: DocumentTemplate): DocumentTemplate =>
+  upgradeBuiltInTemplateFixed(template);
 
-  if (builtIn && (template.id === 'tpl_acceptance_act' || template.id === 'tpl_completion_act')) {
-    return {
-      ...builtIn,
-      isActive: template.isActive,
-      createdAt: template.createdAt,
-      updatedAt: new Date(),
-    };
+const mergeFormListByCode = <T extends { code: string; sortOrder?: number }>(
+  saved: T[],
+  defaults: T[]
+): T[] => {
+  const byCode = new Map(saved.map((item) => [item.code, item]));
+
+  for (const item of defaults) {
+    if (!byCode.has(item.code)) {
+      byCode.set(item.code, item);
+    }
   }
 
-  return upgradeBuiltInTemplateFixed(template);
+  return Array.from(byCode.values()).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
 };
 
 const normalizeSettings = (input: Partial<AppSettings>): AppSettings => {
@@ -417,11 +517,15 @@ const normalizeSettings = (input: Partial<AppSettings>): AppSettings => {
         sortOrder: item.sortOrder ?? index + 1,
       }))
       .sort((a, b) => a.sortOrder - b.sortOrder),
-    clientFields: (input.forms?.clientFields || defaultSettings.forms.clientFields)
+    clientFields: mergeFormListByCode(
+      input.forms?.clientFields || defaultSettings.forms.clientFields,
+      defaultSettings.forms.clientFields
+    )
       .map((item, index) => ({
         ...item,
         label: decodeMojibake(item.label) || defaultSettings.forms.clientFields[index]?.label || item.code,
         required: Boolean(item.required),
+        clientTypes: Array.isArray(item.clientTypes) ? item.clientTypes : undefined,
         sortOrder: item.sortOrder ?? index + 1,
       }))
       .sort((a, b) => a.sortOrder - b.sortOrder),
@@ -470,6 +574,12 @@ const normalizeSettings = (input: Partial<AppSettings>): AppSettings => {
       month: String(entry.month || now.slice(0, 7)),
       updatedAt: entry.updatedAt || now,
     })).filter((entry) => entry.employeeId && /^\d{4}-\d{2}$/.test(entry.month)),
+    rosterHiddenEntries: (input.employeeWork?.rosterHiddenEntries || []).map((entry, index) => ({
+      id: entry.id || `schedule_hidden_${Date.now()}_${index}`,
+      employeeId: String(entry.employeeId || ''),
+      month: String(entry.month || now.slice(0, 7)),
+      updatedAt: entry.updatedAt || now,
+    })).filter((entry) => entry.employeeId && /^\d{4}-\d{2}$/.test(entry.month)),
     tasks: (input.employeeWork?.tasks || []).map((task, index) => {
       const status = ['todo', 'in_progress', 'done', 'blocked'].includes(task.status) ? task.status : 'todo';
       const progress = Math.max(0, Math.min(100, Number(task.progress || 0)));
@@ -490,12 +600,11 @@ const normalizeSettings = (input: Partial<AppSettings>): AppSettings => {
     }).filter((task) => task.employeeId && task.title),
   },
   notifications: {
-    ...defaultSettings.notifications,
-    ...input.notifications,
-    smsStatusTriggers: {
+    smsNotifications: Boolean(input.notifications?.smsNotifications ?? defaultSettings.notifications.smsNotifications),
+    smsStatusTriggers: migrateSmsRecordKeys({
       ...defaultSettings.notifications.smsStatusTriggers,
       ...input.notifications?.smsStatusTriggers,
-    },
+    }),
   },
   business: {
     ...defaultSettings.business,
@@ -505,11 +614,28 @@ const normalizeSettings = (input: Partial<AppSettings>): AppSettings => {
     phone: decodeMojibake(input.business?.phone) || defaultSettings.business.phone,
     email: decodeMojibake(input.business?.email) || defaultSettings.business.email,
     workingHours: decodeMojibake(input.business?.workingHours) || defaultSettings.business.workingHours,
+    logoUrl: typeof input.business?.logoUrl === 'string' ? input.business.logoUrl : defaultSettings.business.logoUrl,
   },
+  appearance: normalizeAppearance({
+    ...defaultSettings.appearance,
+    ...input.appearance,
+    mode:
+      input.appearance?.mode ||
+      (input.system?.theme === 'dark' ? 'dark' : defaultSettings.appearance.mode),
+  }),
   orders: {
     ...defaultSettings.orders,
     ...input.orders,
     createMode: input.orders?.createMode === 'single' ? 'single' : 'step',
+    warehouses: (input.orders?.warehouses || defaultSettings.orders.warehouses)
+      .map((item, index) => ({
+        ...item,
+        name: decodeMojibake(item.name) || `Склад ${index + 1}`,
+        description: decodeMojibake(item.description) || '',
+        enabled: item.enabled ?? true,
+        sortOrder: item.sortOrder ?? index + 1,
+      }))
+      .sort((a, b) => a.sortOrder - b.sortOrder),
     quickSaleOptions: (input.orders?.quickSaleOptions || defaultSettings.orders.quickSaleOptions)
       .map((item, index) => ({
         ...item,
@@ -542,8 +668,8 @@ const normalizeSettings = (input: Partial<AppSettings>): AppSettings => {
       'Клиент согласен с тем, что использование устройства без защитного аксессуара лишает гарантии на экран и иные чувствительные элементы.',
     footerDisclaimer:
       (hasBrokenEncoding(input.documents?.footerDisclaimer)
-        ? 'Документ сформирован в CRM НЭК Сервис.'
-        : decodeMojibake(input.documents?.footerDisclaimer)) || 'Документ сформирован в CRM НЭК Сервис.',
+        ? 'Документ сформирован в CRM.'
+        : decodeMojibake(input.documents?.footerDisclaimer)) || 'Документ сформирован в CRM.',
     templates: (input.documents?.templates || defaultSettings.documents.templates)
       .map(normalizeTemplate)
       .map(upgradeLegacyTemplate),
@@ -571,32 +697,63 @@ const normalizeSettings = (input: Partial<AppSettings>): AppSettings => {
   system: {
     ...defaultSettings.system,
     ...input.system,
+    onboardingCompleted: input.system?.onboardingCompleted ?? defaultSettings.system.onboardingCompleted ?? true,
+    theme: normalizeAppearance({
+      ...defaultSettings.appearance,
+      ...input.appearance,
+      mode:
+        input.appearance?.mode ||
+        (input.system?.theme === 'dark' ? 'dark' : defaultSettings.appearance.mode),
+    }).mode,
   },
   integrations: {
     ...defaultSettings.integrations,
     ...input.integrations,
+    smsProvider: input.integrations?.smsProvider || defaultSettings.integrations.smsProvider,
+    smsConnected: Boolean(input.integrations?.smsConnected),
+    smsCredentials: {
+      ...defaultSettings.integrations.smsCredentials,
+      ...(input.integrations?.smsCredentials || {}),
+    },
     smsWebhookUrl: decodeMojibake(input.integrations?.smsWebhookUrl) || defaultSettings.integrations.smsWebhookUrl,
     smsApiToken: decodeMojibake(input.integrations?.smsApiToken) || defaultSettings.integrations.smsApiToken,
     smsSenderName: decodeMojibake(input.integrations?.smsSenderName) || defaultSettings.integrations.smsSenderName,
     smsTemplateReady: decodeMojibake(input.integrations?.smsTemplateReady) || defaultSettings.integrations.smsTemplateReady,
-    smsStatusTemplates: {
+    smsStatusTemplates: migrateSmsRecordKeys({
       ...defaultSettings.integrations.smsStatusTemplates,
       ...input.integrations?.smsStatusTemplates,
-      diagnosis: decodeMojibake(input.integrations?.smsStatusTemplates?.diagnosis) || defaultSettings.integrations.smsStatusTemplates.diagnosis,
-      waitingParts: decodeMojibake(input.integrations?.smsStatusTemplates?.waitingParts) || defaultSettings.integrations.smsStatusTemplates.waitingParts,
-      waitingClient: decodeMojibake(input.integrations?.smsStatusTemplates?.waitingClient) || defaultSettings.integrations.smsStatusTemplates.waitingClient,
-      inProgress: decodeMojibake(input.integrations?.smsStatusTemplates?.inProgress) || defaultSettings.integrations.smsStatusTemplates.inProgress,
-      ready: decodeMojibake(input.integrations?.smsStatusTemplates?.ready) || defaultSettings.integrations.smsStatusTemplates.ready,
-      completed: decodeMojibake(input.integrations?.smsStatusTemplates?.completed) || defaultSettings.integrations.smsStatusTemplates.completed,
-      cancelled: decodeMojibake(input.integrations?.smsStatusTemplates?.cancelled) || defaultSettings.integrations.smsStatusTemplates.cancelled,
-    },
+      diagnosis:
+        decodeMojibake(input.integrations?.smsStatusTemplates?.diagnosis) ||
+        defaultSettings.integrations.smsStatusTemplates.diagnosis,
+      waiting_parts:
+        decodeMojibake(input.integrations?.smsStatusTemplates?.waiting_parts) ||
+        decodeMojibake(input.integrations?.smsStatusTemplates?.waitingParts) ||
+        defaultSettings.integrations.smsStatusTemplates.waiting_parts,
+      waiting_client:
+        decodeMojibake(input.integrations?.smsStatusTemplates?.waiting_client) ||
+        decodeMojibake(input.integrations?.smsStatusTemplates?.waitingClient) ||
+        defaultSettings.integrations.smsStatusTemplates.waiting_client,
+      in_progress:
+        decodeMojibake(input.integrations?.smsStatusTemplates?.in_progress) ||
+        decodeMojibake(input.integrations?.smsStatusTemplates?.inProgress) ||
+        defaultSettings.integrations.smsStatusTemplates.in_progress,
+      ready:
+        decodeMojibake(input.integrations?.smsStatusTemplates?.ready) ||
+        defaultSettings.integrations.smsStatusTemplates.ready,
+      completed:
+        decodeMojibake(input.integrations?.smsStatusTemplates?.completed) ||
+        defaultSettings.integrations.smsStatusTemplates.completed,
+      cancelled:
+        decodeMojibake(input.integrations?.smsStatusTemplates?.cancelled) ||
+        defaultSettings.integrations.smsStatusTemplates.cancelled,
+    }),
     smsWebhookMethod: input.integrations?.smsWebhookMethod || defaultSettings.integrations.smsWebhookMethod,
-    whatsappMode: input.integrations?.whatsappMode || defaultSettings.integrations.whatsappMode,
-    whatsappLinkTemplate:
-      decodeMojibake(input.integrations?.whatsappLinkTemplate) || defaultSettings.integrations.whatsappLinkTemplate,
     telegramMode: input.integrations?.telegramMode || defaultSettings.integrations.telegramMode,
     telegramLinkTemplate:
       decodeMojibake(input.integrations?.telegramLinkTemplate) || defaultSettings.integrations.telegramLinkTemplate,
+    telegramConnected: Boolean(input.integrations?.telegramConnected),
+    telegramBotToken: decodeMojibake(input.integrations?.telegramBotToken) || '',
+    telegramBotUsername: decodeMojibake(input.integrations?.telegramBotUsername) || '',
     callMode: input.integrations?.callMode || defaultSettings.integrations.callMode,
     callLinkTemplate:
       decodeMojibake(input.integrations?.callLinkTemplate) || defaultSettings.integrations.callLinkTemplate,
@@ -607,10 +764,34 @@ const normalizeSettings = (input: Partial<AppSettings>): AppSettings => {
     plan: decodeMojibake(input.license?.plan) || defaultSettings.license.plan,
     key: decodeMojibake(input.license?.key) || defaultSettings.license.key,
   },
+  employeeAccess: {
+    ...defaultSettings.employeeAccess,
+    ...input.employeeAccess,
+    visibleSections: (() => {
+      const saved = input.employeeAccess?.visibleSections;
+      if (
+        !Array.isArray(saved) ||
+        saved.length === 0 ||
+        (saved.length === 1 && saved[0] === 'profile')
+      ) {
+        return defaultSettings.employeeAccess.visibleSections;
+      }
+      return saved;
+    })(),
+    selfEditableFields: Array.isArray(input.employeeAccess?.selfEditableFields)
+      ? input.employeeAccess!.selfEditableFields.filter((field) =>
+          ['avatar', 'phone', 'name'].includes(field)
+        )
+      : defaultSettings.employeeAccess.selfEditableFields,
+  },
 });
 }
 
 class AppSettingsService {
+  private storageKey() {
+    return tenantStorageKey(SETTINGS_STORAGE_BASE, getStoredTenantId());
+  }
+
   private notifyUpdate(settings: AppSettings) {
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent(SETTINGS_UPDATED_EVENT, { detail: settings }));
@@ -622,31 +803,40 @@ class AppSettingsService {
   }
 
   getSettings(): AppSettings {
-    const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    const saved = localStorage.getItem(this.storageKey());
     if (!saved) {
-      const defaults = this.getDefaults();
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(defaults));
-      return defaults;
+      return this.getDefaults();
     }
 
     try {
       const normalized = normalizeSettings(JSON.parse(saved) as Partial<AppSettings>);
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(normalized));
+      localStorage.setItem(this.storageKey(), JSON.stringify(normalized));
       return normalized;
     } catch {
-      const defaults = this.getDefaults();
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(defaults));
-      return defaults;
+      return this.getDefaults();
     }
   }
 
-  async refreshFromApi(): Promise<AppSettings> {
+  cacheSettingsLocally(settings: AppSettings): AppSettings {
+    const normalized = normalizeSettings(settings);
+    localStorage.setItem(this.storageKey(), JSON.stringify(normalized));
+    return normalized;
+  }
+
+  async refreshFromApi(options?: { notify?: boolean; persist?: boolean }): Promise<AppSettings> {
+    const notify = options?.notify !== false;
+    const persist = options?.persist !== false;
+
     try {
       const remote = await apiService.get<Partial<AppSettings>>('/settings');
       const normalized = normalizeSettings(remote);
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(normalized));
-      this.notifyUpdate(normalized);
-      if (hasLegacyDocumentTemplatesFixed(remote.documents?.templates)) {
+      if (persist) {
+        localStorage.setItem(this.storageKey(), JSON.stringify(normalized));
+      }
+      if (notify) {
+        this.notifyUpdate(normalized);
+      }
+      if (isStoredUserAdmin() && hasLegacyDocumentTemplatesFixed(remote.documents?.templates)) {
         try {
           await apiService.put('/settings', normalized);
         } catch {
@@ -661,21 +851,22 @@ class AppSettingsService {
 
   async saveSettings(settings: AppSettings): Promise<AppSettings> {
     const normalized = normalizeSettings(settings);
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(normalized));
+    localStorage.setItem(this.storageKey(), JSON.stringify(normalized));
     this.notifyUpdate(normalized);
 
-    try {
-      await apiService.put('/settings', normalized);
-    } catch {
-      // Keep local cache if API is temporarily unavailable.
-    }
+    await apiService.put('/settings', normalized);
+
+    // Keep the payload we just saved. Re-normalizing the PUT response can reset
+    // appearance.mode to light and rewrite document templates via server migrations.
+    localStorage.setItem(this.storageKey(), JSON.stringify(normalized));
+    this.notifyUpdate(normalized);
 
     return normalized;
   }
 
   async resetSettings(): Promise<AppSettings> {
     const defaults = this.getDefaults();
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(defaults));
+    localStorage.setItem(this.storageKey(), JSON.stringify(defaults));
     this.notifyUpdate(defaults);
 
     try {
@@ -689,3 +880,5 @@ class AppSettingsService {
 }
 
 export const appSettingsService = new AppSettingsService();
+
+export const isOnboardingRequired = (settings: AppSettings) => settings.system?.onboardingCompleted === false;

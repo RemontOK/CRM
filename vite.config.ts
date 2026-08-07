@@ -1,7 +1,7 @@
 ﻿import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-export default defineConfig(({ command }) => ({
+export default defineConfig(() => ({
   plugins: [react()],
   base: '/',
   server: {
@@ -10,19 +10,11 @@ export default defineConfig(({ command }) => ({
   },
   build: {
     outDir: 'build',
+    emptyOutDir: true,
     sourcemap: false,
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          vendor: ['react', 'react-dom'],
-          mui: ['@mui/material', '@mui/icons-material'],
-          router: ['react-router-dom'],
-          charts: ['recharts'],
-        },
-      },
-    },
   },
   resolve: {
+    dedupe: ['react', 'react-dom', 'react/jsx-runtime'],
     alias: {
       '@': '/src',
     },

@@ -2,10 +2,37 @@ import { Device, Order, Payment } from '../types';
 import { apiService } from './api';
 import { normalizePhoneForStorage } from '../utils/phone';
 
+const ORDERS_CACHE_KEY = 'crm_orders_cache_v1';
+
 const normalizeOrder = (order: Order): Order => ({
   ...order,
   clientPhone: normalizePhoneForStorage(order.clientPhone || ''),
 });
+
+const readOrdersCache = (): Order[] => {
+  try {
+    const raw = localStorage.getItem(ORDERS_CACHE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((order) => normalizeOrder(order as Order)) : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeOrdersCache = (orders: Order[]) => {
+  try {
+    localStorage.setItem(ORDERS_CACHE_KEY, JSON.stringify(orders));
+  } catch {
+    // ignore quota errors
+  }
+};
+
+const clearOrdersCache = () => {
+  localStorage.removeItem(ORDERS_CACHE_KEY);
+};
 
 class OrderService {
   async createOrder(orderData: Partial<Order>): Promise<Order> {
@@ -26,8 +53,29 @@ class OrderService {
     await apiService.delete(`/orders/${id}`);
   }
 
-  async getOrders(): Promise<Order[]> {
-    return (await apiService.get<Order[]>('/orders')).map((order) => normalizeOrder(order));
+  getCachedOrders(): Order[] {
+    return readOrdersCache();
+  }
+
+  clearSession() {
+    clearOrdersCache();
+  }
+
+  async getOrders(options?: { lite?: boolean }): Promise<Order[]> {
+    const lite = options?.lite !== false;
+    const query = lite ? '?lite=1' : '';
+    try {
+      const orders = (await apiService.get<Order[]>(`/orders${query}`)).map((order) => normalizeOrder(order));
+      if (lite) {
+        writeOrdersCache(orders);
+      }
+      return orders;
+    } catch {
+      if (lite) {
+        return this.getCachedOrders();
+      }
+      throw new Error('Не удалось загрузить заказы');
+    }
   }
 
   async getOrderById(id: string): Promise<Order | null> {
@@ -51,7 +99,7 @@ class OrderService {
     const orders = await this.getOrders();
     const totalOrders = orders.length;
     const completedOrders = orders.filter((order) => order.status === 'completed').length;
-    const pendingOrders = orders.filter((order) => order.status === 'pending').length;
+    const pendingOrders = orders.filter((order) => order.status === 'pending' || order.status === 'new').length;
     const inProgressOrders = orders.filter((order) => order.status === 'in_progress').length;
     const waitingPartsOrders = orders.filter((order) => order.status === 'waiting_parts').length;
 

@@ -20,7 +20,6 @@ import {
   Add,
   DeleteOutline,
   EditOutlined,
-  EmailOutlined,
   LocationOnOutlined,
   PhoneOutlined,
   Search,
@@ -30,28 +29,31 @@ import { DataGrid, GridColDef } from '@mui/x-data-grid';
 import { motion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { clientService } from '../../services/clientService';
+import { useCompanyName } from '../../hooks/useCompanyName';
 import { orderService } from '../../services/orderService';
 import { Client, Order } from '../../types';
-import { heroCardSx, pageShellSx, panelCardSx, sectionTitleSx, toolbarCardSx } from '../../styles/ui';
+import { appSettingsService } from '../../services/appSettingsService';
+import ClientFormDialog, { ClientFormState } from '../../components/ClientFormDialog/ClientFormDialog';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import {
+  buildClientFieldValuesFromClient,
+  buildClientPayloadFromFields,
+  getClientFieldValue,
+  getEnabledClientFields,
+} from '../../utils/clientFieldUtils';
+import { dataGridSx, heroCardSx, pageShellSx, panelCardSx, sectionTitleSx, toolbarCardSx } from '../../styles/ui';
 import { getOrderPaidAmount } from '../../utils/orderMetrics';
 import { formatPhone, normalizePhoneForCompare, normalizePhoneForStorage } from '../../utils/phone';
 
-type ClientFormState = {
-  firstName: string;
-  lastName: string;
-  phone: string;
-  email: string;
-  address: string;
-  notes: string;
-};
+type ClientFormStateLocal = ClientFormState;
 
-const emptyForm: ClientFormState = {
+const emptyForm: ClientFormStateLocal = {
   firstName: '',
   lastName: '',
   phone: '',
-  email: '',
   address: '',
   notes: '',
+  fieldValues: {},
 };
 
 const formatDate = (value?: string | null) => {
@@ -79,16 +81,20 @@ const getSavedGridPageSize = (key: string) => {
 };
 
 const Clients: React.FC = () => {
+  const companyName = useCompanyName();
   const [clients, setClients] = useState<Client[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearchTerm = useDebouncedValue(searchTerm, 300);
   const [selectedClient, setSelectedClient] = useState<Client | null>(null);
   const [editingClient, setEditingClient] = useState<Client | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isViewOpen, setIsViewOpen] = useState(false);
   const [deleteCandidate, setDeleteCandidate] = useState<Client | null>(null);
-  const [formData, setFormData] = useState<ClientFormState>(emptyForm);
+  const [clientFormInitial, setClientFormInitial] = useState<ClientFormStateLocal>(emptyForm);
   const [rowsPerPage, setRowsPerPage] = useState(() => getSavedGridPageSize(CLIENTS_GRID_PAGE_SIZE_KEY));
+  const crmSettings = useMemo(() => appSettingsService.getSettings(), []);
+  const enabledClientFields = useMemo(() => getEnabledClientFields(crmSettings), [crmSettings]);
 
   const refreshClients = async () => {
     await clientService.refreshFromApi();
@@ -132,18 +138,26 @@ const Clients: React.FC = () => {
   }, [clients, orders]);
 
   const filteredClients = useMemo(() => {
-    const normalizedSearch = searchTerm.trim().toLowerCase();
+    const normalizedSearch = debouncedSearchTerm.trim().toLowerCase();
     if (!normalizedSearch) {
       return clientsWithStats;
     }
 
     return clientsWithStats.filter((client) =>
-      [client.firstName, client.lastName, client.phone, client.email || '', client.address || '', client.notes || '']
+      [
+        client.firstName,
+        client.lastName,
+        client.phone,
+        client.email || '',
+        client.address || '',
+        client.notes || '',
+        ...Object.values(client.customFields || {}),
+      ]
         .join(' ')
         .toLowerCase()
         .includes(normalizedSearch)
     );
-  }, [clientsWithStats, searchTerm]);
+  }, [clientsWithStats, debouncedSearchTerm]);
 
   const stats = useMemo(() => {
     const totalClients = clientsWithStats.length;
@@ -168,45 +182,50 @@ const Clients: React.FC = () => {
 
   const openCreateDialog = () => {
     setEditingClient(null);
-    setFormData(emptyForm);
+    setClientFormInitial(emptyForm);
     setIsFormOpen(true);
   };
 
   const openEditDialog = (client: Client) => {
     setEditingClient(client);
-    setFormData({
+    setClientFormInitial({
       firstName: client.firstName,
       lastName: client.lastName,
       phone: client.phone,
-      email: client.email || '',
       address: client.address || '',
       notes: client.notes || '',
+      fieldValues: buildClientFieldValuesFromClient(client, crmSettings),
     });
     setIsFormOpen(true);
   };
 
-  const handleFormChange = (field: keyof ClientFormState, value: string) => {
-    setFormData((current) => ({ ...current, [field]: value }));
-  };
-
-  const handleSaveClient = async () => {
+  const handleSaveClient = async (formData: ClientFormStateLocal) => {
     if (!formData.firstName.trim() || !formData.lastName.trim() || !formData.phone.trim()) {
       toast.error('Заполните имя, фамилию и телефон');
       return;
     }
 
     try {
+      const clientPayload = buildClientPayloadFromFields({
+        settings: crmSettings,
+        fieldValues: formData.fieldValues,
+        firstName: formData.firstName.trim(),
+        lastName: formData.lastName.trim(),
+        phone: normalizePhoneForStorage(formData.phone),
+        address: formData.address,
+        existingClient: editingClient,
+      });
+
       if (editingClient) {
         await clientService.updateClient(editingClient.id, {
-          ...editingClient,
-          ...formData,
-          phone: normalizePhoneForStorage(formData.phone),
+          ...clientPayload,
+          notes: formData.notes || clientPayload.notes,
         });
         toast.success('Карточка клиента обновлена');
       } else {
         await clientService.createClient({
-          ...formData,
-          phone: normalizePhoneForStorage(formData.phone),
+          ...clientPayload,
+          notes: formData.notes || clientPayload.notes,
         });
         toast.success('Клиент добавлен');
       }
@@ -309,7 +328,7 @@ const Clients: React.FC = () => {
           CRM · КЛИЕНТСКАЯ БАЗА
         </Typography>
         <Typography variant="h3" sx={{ mt: 1.5, mb: 1.5, color: 'common.white' }}>
-          Клиенты НЭК Сервис
+          Клиенты {companyName}
         </Typography>
         <Typography sx={{ maxWidth: 760, color: 'rgba(255,255,255,0.78)' }}>
           Карточка клиента с контактами, историей обращений, заказами и выручкой.
@@ -383,46 +402,20 @@ const Clients: React.FC = () => {
                 localStorage.setItem(CLIENTS_GRID_PAGE_SIZE_KEY, String(value));
               }}
               disableSelectionOnClick
-              sx={{
-                border: 'none',
-                '& .MuiDataGrid-columnSeparator': {
-                  display: 'none',
-                },
-              }}
+              sx={dataGridSx}
             />
           </Box>
         </CardContent>
       </Card>
 
-      <Dialog open={isFormOpen} onClose={() => setIsFormOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle sx={sectionTitleSx}>{editingClient ? 'Редактировать клиента' : 'Новый клиент'}</DialogTitle>
-        <DialogContent>
-          <Grid container spacing={2} sx={{ mt: 1 }}>
-            <Grid item xs={12} sm={6}>
-              <TextField fullWidth label="Имя" value={formData.firstName} onChange={(event) => handleFormChange('firstName', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField fullWidth label="Фамилия" value={formData.lastName} onChange={(event) => handleFormChange('lastName', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField fullWidth label="Телефон" value={formData.phone} onChange={(event) => handleFormChange('phone', event.target.value)} />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField fullWidth label="Email" value={formData.email} onChange={(event) => handleFormChange('email', event.target.value)} />
-            </Grid>
-            <Grid item xs={12}>
-              <TextField fullWidth label="Адрес" value={formData.address} onChange={(event) => handleFormChange('address', event.target.value)} />
-            </Grid>
-            <Grid item xs={12}>
-              <TextField fullWidth label="Заметки" multiline rows={4} value={formData.notes} onChange={(event) => handleFormChange('notes', event.target.value)} />
-            </Grid>
-          </Grid>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsFormOpen(false)}>Отмена</Button>
-          <Button variant="contained" onClick={handleSaveClient}>Сохранить</Button>
-        </DialogActions>
-      </Dialog>
+      <ClientFormDialog
+        open={isFormOpen}
+        title={editingClient ? 'Редактировать клиента' : 'Новый клиент'}
+        initialValues={clientFormInitial}
+        settings={crmSettings}
+        onClose={() => setIsFormOpen(false)}
+        onSave={handleSaveClient}
+      />
 
       <Dialog open={isViewOpen} onClose={() => setIsViewOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle sx={sectionTitleSx}>Карточка клиента</DialogTitle>
@@ -437,7 +430,18 @@ const Clients: React.FC = () => {
                 </Box>
               </Box>
               <Box display="flex" alignItems="center" gap={1.5}><PhoneOutlined fontSize="small" /><Typography>{formatPhone(selectedClientWithStats.phone)}</Typography></Box>
-              <Box display="flex" alignItems="center" gap={1.5}><EmailOutlined fontSize="small" /><Typography>{selectedClientWithStats.email || 'Email не указан'}</Typography></Box>
+              {enabledClientFields.map((field) => {
+                const value = getClientFieldValue(selectedClientWithStats, field.code);
+                if (!value) {
+                  return null;
+                }
+                return (
+                  <Box key={field.id}>
+                    <Typography variant="subtitle2" color="text.secondary">{field.label}</Typography>
+                    <Typography>{value}</Typography>
+                  </Box>
+                );
+              })}
               <Box display="flex" alignItems="center" gap={1.5}><LocationOnOutlined fontSize="small" /><Typography>{selectedClientWithStats.address || 'Адрес не указан'}</Typography></Box>
               <Grid container spacing={2}>
                 <Grid item xs={4}><Typography variant="subtitle2" color="text.secondary">Заказов</Typography><Typography fontWeight={700}>{selectedClientWithStats.totalOrders}</Typography></Grid>
@@ -445,7 +449,7 @@ const Clients: React.FC = () => {
                 <Grid item xs={4}><Typography variant="subtitle2" color="text.secondary">Последний заказ</Typography><Typography fontWeight={700}>{formatDate(selectedClientWithStats.lastOrderDate)}</Typography></Grid>
               </Grid>
               <Box>
-                <Typography variant="subtitle2" color="text.secondary">Заметки</Typography>
+                <Typography variant="subtitle2" color="text.secondary">Служебные заметки</Typography>
                 <Typography>{selectedClientWithStats.notes || 'Пока без заметок'}</Typography>
               </Box>
             </Stack>

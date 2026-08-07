@@ -1,0 +1,21 @@
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Скопируйте в config.yoomoney.php (файл в .gitignore, не коммитить).
+ * Либо добавьте секцию yoomoney в api/config.local.php на сервере.
+ *
+ * Настройка в кошельке ЮMoney:
+ * 1. https://yoomoney.ru/transfer/myservices/http-notification
+ * 2. URL уведомлений: https://nakcrm.ru/api/platform/billing/yoomoney/notify
+ * 3. Скопируйте «Секрет для проверки» → notification_secret
+ * 4. Номер кошелька (41001...) → wallet
+ */
+return [
+    'yoomoney' => [
+        'wallet' => '',
+        'notification_secret' => '',
+        'monthly_price' => 0,
+    ],
+];

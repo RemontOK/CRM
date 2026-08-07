@@ -1,12 +1,12 @@
 import { SxProps, Theme, alpha } from '@mui/material/styles';
-import { crmColors, crmRadius, crmShadow } from './tokens';
+import { crmRadius } from './tokens';
 
 export const statCardSx: SxProps<Theme> = {
   height: '100%',
   borderRadius: crmRadius.lg,
-  border: `1px solid ${crmColors.line}`,
-  boxShadow: crmShadow.panel,
-  backgroundColor: crmColors.surfaceStrong,
+  border: '1px solid var(--crm-border)',
+  boxShadow: 'var(--crm-shadow)',
+  backgroundColor: 'var(--crm-panel)',
 };
 
 export const metricValueSx: SxProps<Theme> = {
@@ -32,9 +32,9 @@ export const metricIconWrapSx = (color: string): SxProps<Theme> => ({
 
 export const tableShellSx: SxProps<Theme> = {
   borderRadius: crmRadius.lg,
-  border: `1px solid ${crmColors.line}`,
-  boxShadow: crmShadow.panel,
-  backgroundColor: crmColors.surfaceStrong,
+  border: '1px solid var(--crm-border)',
+  boxShadow: 'var(--crm-shadow)',
+  backgroundColor: 'var(--crm-panel)',
   overflow: 'hidden',
 };
 
@@ -50,9 +50,9 @@ export const sectionCardSx: SxProps<Theme> = {
 
 export const dialogPanelSx: SxProps<Theme> = {
   borderRadius: crmRadius.lg,
-  border: `1px solid ${crmColors.line}`,
-  boxShadow: crmShadow.soft,
-  backgroundColor: crmColors.surfaceStrong,
+  border: '1px solid var(--crm-border)',
+  boxShadow: 'var(--crm-shadow-soft)',
+  backgroundColor: 'var(--crm-panel)',
 };
 
 export const fieldGroupSx: SxProps<Theme> = {

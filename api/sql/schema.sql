@@ -20,9 +20,14 @@ CREATE TABLE IF NOT EXISTS users (
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     hire_date DATETIME NULL,
     last_login DATETIME NULL,
+    email_verified TINYINT(1) NOT NULL DEFAULT 0,
+    email_verification_token VARCHAR(64) NULL DEFAULT NULL,
+    email_verification_sent_at DATETIME NULL DEFAULT NULL,
+    email_verified_at DATETIME NULL DEFAULT NULL,
+    access_json TEXT NULL,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
-    KEY idx_users_login_email (login_email),
+    UNIQUE KEY uniq_users_login_email (login_email),
     KEY idx_users_role (role)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -42,9 +47,11 @@ CREATE TABLE IF NOT EXISTS clients (
     first_name VARCHAR(255) NOT NULL,
     last_name VARCHAR(255) NOT NULL DEFAULT '',
     phone VARCHAR(64) NOT NULL,
+    telegram_chat_id VARCHAR(64) NOT NULL DEFAULT '',
     email VARCHAR(255) NOT NULL DEFAULT '',
     address VARCHAR(255) NOT NULL DEFAULT '',
     notes TEXT NULL,
+    custom_fields_json TEXT NULL,
     total_orders INT NOT NULL DEFAULT 0,
     total_spent DECIMAL(12,2) NOT NULL DEFAULT 0,
     last_order_date DATETIME NULL,
@@ -93,6 +100,8 @@ CREATE TABLE IF NOT EXISTS orders (
     communication_history_json JSON NULL,
     completed_at DATETIME NULL,
     is_paid TINYINT(1) NOT NULL DEFAULT 0,
+    is_warranty TINYINT(1) NOT NULL DEFAULT 0,
+    device_password VARCHAR(255) NOT NULL DEFAULT '',
     client_name VARCHAR(255) NOT NULL DEFAULT '',
     client_phone VARCHAR(64) NOT NULL DEFAULT '',
     device_brand VARCHAR(255) NOT NULL DEFAULT '',
@@ -126,12 +135,13 @@ CREATE TABLE IF NOT EXISTS inventory_parts (
     quantity INT NOT NULL DEFAULT 0,
     min_quantity INT NOT NULL DEFAULT 0,
     alert_threshold INT NOT NULL DEFAULT 0,
-    notifications_enabled TINYINT(1) NOT NULL DEFAULT 1,
+    notifications_enabled TINYINT(1) NOT NULL DEFAULT 0,
     wholesale_price DECIMAL(12,2) NOT NULL DEFAULT 0,
     unit_price DECIMAL(12,2) NOT NULL DEFAULT 0,
     supplier VARCHAR(255) NOT NULL DEFAULT '',
     supplier_contact VARCHAR(255) NOT NULL DEFAULT '',
     location_name VARCHAR(255) NOT NULL DEFAULT '',
+    warehouse_id VARCHAR(64) NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     KEY idx_inventory_parts_category (category),
@@ -180,4 +190,40 @@ CREATE TABLE IF NOT EXISTS app_settings (
     `key` VARCHAR(64) NOT NULL PRIMARY KEY,
     payload_json JSON NOT NULL,
     updated_at DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS tenants (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(128) NOT NULL,
+    owner_user_id VARCHAR(64) NULL,
+    status ENUM('trial', 'active', 'suspended', 'expired') NOT NULL DEFAULT 'trial',
+    trial_ends_at DATETIME NULL,
+    subscription_ends_at DATETIME NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE KEY uniq_tenants_slug (slug),
+    KEY idx_tenants_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS tenant_activity_log (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id BIGINT UNSIGNED NULL,
+    user_id VARCHAR(64) NULL,
+    action VARCHAR(64) NOT NULL,
+    details TEXT NULL,
+    ip_address VARCHAR(45) NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL,
+    KEY idx_activity_tenant (tenant_id),
+    KEY idx_activity_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS subscription_plans (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(32) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    price_monthly DECIMAL(12,2) NOT NULL DEFAULT 0,
+    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL,
+    UNIQUE KEY uniq_plans_code (code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

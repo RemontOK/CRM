@@ -1,3 +1,49 @@
+export type SettingsSectionKey =
+  | 'appearance'
+  | 'business'
+  | 'locations'
+  | 'employees'
+  | 'profile'
+  | 'documents'
+  | 'integrations'
+  | 'license'
+  | 'orders'
+  | 'quickSales'
+  | 'statuses'
+  | 'notifications'
+  | 'email'
+  | 'sms'
+  | 'paymentCategories'
+  | 'paymentMethods'
+  | 'clientFields';
+
+export interface CrmAppearanceSettings {
+  preset: string;
+  primaryColor: string;
+  primaryLight: string;
+  primaryDark: string;
+  secondaryColor: string;
+  sidebarColor: string;
+  surfaceColor: string;
+  inkColor: string;
+  mode: 'light' | 'dark';
+}
+
+export interface EmployeeAccess {
+  visibleSections: SettingsSectionKey[];
+  selfEditableFields: Array<'avatar' | 'phone' | 'name'>;
+  allowedModules?: string[];
+}
+
+export interface EmployeeAccessConfig {
+  allowedModules: string[];
+  visibleSections?: SettingsSectionKey[];
+  selfEditableFields?: Array<'avatar' | 'phone' | 'name'>;
+}
+
+/** @deprecated Use EmployeeAccessConfig */
+export type EmployeeModuleAccess = EmployeeAccessConfig;
+
 export interface User {
   id: string;
   email: string;
@@ -8,8 +54,95 @@ export interface User {
   rating: number;
   totalEarnings: number;
   isActive: boolean;
+  emailVerified?: boolean;
+  isPlatformAdmin?: boolean;
+  tenantId?: number;
+  tenant?: TenantInfo;
   createdAt: Date;
   updatedAt: Date;
+  employeeAccess?: EmployeeAccess;
+}
+
+export type TenantAccessStatus = 'trial' | 'active' | 'expired' | 'suspended';
+
+export interface TenantInfo {
+  id: number;
+  name: string;
+  slug: string;
+  ownerUserId?: string;
+  status: 'trial' | 'active' | 'suspended' | 'expired';
+  accessStatus: TenantAccessStatus;
+  trialEndsAt?: string;
+  subscriptionEndsAt?: string;
+  trialDaysRemaining?: number | null;
+  locationSlots?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AdminTenantInfo extends TenantInfo {
+  userCount: number;
+  lastActivityAt?: string;
+  ownerEmail?: string;
+}
+
+export interface AdminTenantUser {
+  id: string;
+  name: string;
+  loginEmail: string;
+  email: string;
+  role: string;
+  canLogin: boolean;
+  isActive: boolean;
+  emailVerified: boolean;
+  lastLogin?: string;
+  createdAt?: string;
+}
+
+export interface TenantActivityItem {
+  id: number;
+  tenantId?: number | null;
+  tenantName?: string;
+  userId?: string;
+  userName?: string;
+  userEmail?: string;
+  action: string;
+  details?: string;
+  ipAddress?: string;
+  createdAt: string;
+}
+
+export interface UserNotification {
+  id: number;
+  type: string;
+  title: string;
+  message: string;
+  maintenanceAt?: string | null;
+  readAt?: string | null;
+  createdAt: string;
+}
+
+export interface RegisterCredentials {
+  companyName: string;
+  email: string;
+  password: string;
+  phone?: string;
+  name?: string;
+}
+
+export interface RegisterResponse {
+  verificationSent: boolean;
+  email: string;
+}
+
+export interface VerifyEmailResponse {
+  verified: boolean;
+  email: string;
+}
+
+export interface ResendVerificationResponse {
+  sent: boolean;
+  email: string;
 }
 
 export interface Client {
@@ -17,9 +150,11 @@ export interface Client {
   firstName: string;
   lastName: string;
   phone: string;
+  telegramChatId?: string;
   email?: string;
   address?: string;
   notes?: string;
+  customFields?: Record<string, string>;
   totalOrders: number;
   totalSpent: number;
   lastOrderDate?: string | null;
@@ -35,6 +170,7 @@ export interface Device {
   serialNumber?: string;
   imei?: string;
   color?: string;
+  password?: string;
   condition: 'excellent' | 'good' | 'fair' | 'poor';
   externalCondition?: string; // Сколы, потертости, скрытые дефекты
   clientId: string;
@@ -49,6 +185,7 @@ export interface OrderStatusSetting {
   enabled: boolean;
   isFinal: boolean;
   sortOrder: number;
+  isSystem?: boolean;
 }
 
 export interface Order {
@@ -75,6 +212,7 @@ export interface Order {
   updatedAt: string;
   completedAt?: string;
   isPaid: boolean; // оплачен ли заказ
+  isWarranty?: boolean; // гарантийный заказ
   
   // Дополнительные поля для отображения в таблице
   clientName?: string;
@@ -95,6 +233,45 @@ export interface OrderCommunicationEntry {
   channel: 'whatsapp' | 'telegram' | 'sms' | 'system' | 'internal' | 'payment';
   author: string;
   message: string;
+  createdAt: string;
+  direction?: 'inbound' | 'outbound';
+}
+
+export interface TelegramInboxItem {
+  id: string;
+  chatId: string;
+  clientId: string;
+  orderId: string;
+  orderNumber: string;
+  clientName: string;
+  clientPhone: string;
+  message: string;
+  direction: 'inbound' | 'outbound';
+  createdAt: string;
+  readAt?: string | null;
+}
+
+export interface TelegramInboxReadPayload {
+  ids?: string[];
+  orderId?: string;
+  chatId?: string;
+  clientId?: string;
+  phone?: string;
+  markAll?: boolean;
+}
+
+export interface TelegramInboxStatus {
+  latestId: string;
+  latestAt: string | null;
+  unreadCount: number;
+}
+
+export interface SmsInboxItem {
+  id: string;
+  phone: string;
+  clientName: string;
+  message: string;
+  direction: 'inbound' | 'outbound';
   createdAt: string;
 }
 
@@ -126,6 +303,7 @@ export interface Part {
   supplier: string;
   supplierContact?: string;
   location: string;
+  warehouseId?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -152,6 +330,7 @@ export interface Employee {
   isActive: boolean;
   hireDate: Date;
   lastLogin: Date;
+  access?: EmployeeAccessConfig;
 }
 
 export type EmployeeTaskStatus = 'todo' | 'in_progress' | 'done' | 'blocked';
@@ -239,10 +418,19 @@ export interface PaymentMethodOption {
   registerType: 'cashbox' | 'bank_terminal' | 'online' | 'mixed';
 }
 
+export interface Warehouse {
+  id: string;
+  name: string;
+  description?: string;
+  enabled: boolean;
+  sortOrder: number;
+}
+
 export interface QuickSaleOption {
   id: string;
   label: string;
-  category: string;
+  warehouseId?: string;
+  category?: string;
   saleMode: 'single' | 'quantity';
   enabled: boolean;
   sortOrder: number;
@@ -279,6 +467,8 @@ export interface AppSettings {
       enabled: boolean;
       required: boolean;
       sortOrder: number;
+      /** If set, the field is shown only for these client type codes (e.g. company). */
+      clientTypes?: string[];
     }>;
     directories: Array<{
       id: string;
@@ -307,16 +497,11 @@ export interface AppSettings {
   employeeWork: {
     schedules: EmployeeScheduleEntry[];
     rosterEntries: EmployeeScheduleRosterEntry[];
+    rosterHiddenEntries: EmployeeScheduleRosterEntry[];
     tasks: EmployeeTask[];
   };
   notifications: {
-    emailNotifications: boolean;
     smsNotifications: boolean;
-    pushNotifications: boolean;
-    orderUpdates: boolean;
-    paymentReminders: boolean;
-    lowStockAlerts: boolean;
-    smsOnReadyStatus: boolean;
     smsStatusTriggers: Record<string, boolean>;
   };
   business: {
@@ -326,12 +511,15 @@ export interface AppSettings {
     email: string;
     workingHours: string;
     timezone: string;
+    logoUrl?: string;
   };
+  appearance: CrmAppearanceSettings;
   orders: {
     defaultPriority: 'low' | 'medium' | 'high' | 'urgent';
     autoOpenCompletionAfterPayment: boolean;
     createMode: 'single' | 'step';
     quickSaleOptions: QuickSaleOption[];
+    warehouses: Warehouse[];
     statuses: OrderStatusSetting[];
     statusLabels: Record<string, string>;
     statusColors: Record<string, string>;
@@ -358,25 +546,33 @@ export interface AppSettings {
     dataRetention: number;
     language: string;
     theme: string;
+    onboardingCompleted?: boolean;
   };
     integrations: {
-      smsProvider: 'none' | 'webhook';
+      smsProvider: 'none' | 'moizvonki' | 'smsru' | 'smsc' | 'smsaero' | 'webhook';
+      smsConnected: boolean;
+      smsCredentials: Record<string, string>;
       smsWebhookUrl: string;
       smsApiToken: string;
       smsSenderName: string;
       smsTemplateReady: string;
       smsStatusTemplates: Record<string, string>;
       smsWebhookMethod: 'POST' | 'GET';
-      whatsappMode: 'crm' | 'crm_and_link' | 'link_only' | 'custom';
-      whatsappLinkTemplate: string;
     telegramMode: 'crm' | 'crm_and_link' | 'link_only' | 'custom';
     telegramLinkTemplate: string;
+    telegramConnected: boolean;
+    telegramBotToken: string;
+    telegramBotUsername: string;
     callMode: 'tel' | 'custom';
     callLinkTemplate: string;
   };
   license: {
     plan: string;
     key: string;
+  };
+  employeeAccess: {
+    visibleSections: SettingsSectionKey[];
+    selfEditableFields: Array<'avatar' | 'phone' | 'name'>;
   };
 }
 
@@ -480,6 +676,8 @@ export interface AcceptanceAct {
   problemDescription: string;
   preliminaryCost: number;
   advancePayment?: number;
+  estimatedDays?: number;
+  estimatedCompletionDate?: string;
   acceptanceDate: Date;
   acceptedBy: string; // мастер
   conditions: string; // условия хранения

@@ -1,9 +1,14 @@
 ﻿import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import { ApiResponse, PaginatedResponse } from '../types';
-
+import {
+  dispatchSubscriptionBlocked,
+  extractBlockedTenantFromApiError,
+  isSubscriptionBlockedApiError,
+} from '../utils/tenantAccess';
 const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+const configuredApiUrl = env?.VITE_API_URL?.trim();
 const apiBaseUrl =
-  env?.VITE_API_URL ||
+  configuredApiUrl ||
   (typeof window !== 'undefined' ? `${window.location.origin}/api` : '/api');
 
 const technicalErrorTranslations: Array<[RegExp, string]> = [
@@ -31,7 +36,8 @@ export const getApiErrorMessage = (error: unknown, fallback = 'Не удалос
       422: 'Проверьте заполнение формы: часть данных не прошла проверку.',
       500: 'Ошибка сервера. Данные не сохранены, попробуйте еще раз или сообщите администратору.',
     };
-    const apiMessage = (error.response?.data as any)?.message;
+    const responseData = error.response?.data as { message?: string; error?: string } | undefined;
+    const apiMessage = responseData?.message || responseData?.error;
     if (typeof apiMessage === 'string' && apiMessage.trim()) {
       const looksGarbled = /Р[ РЎ]/.test(apiMessage) || /Р.{0,2}Р.{0,2}Р/.test(apiMessage);
       if (!looksGarbled) {
@@ -62,7 +68,7 @@ class ApiService {
   constructor() {
     this.api = axios.create({
       baseURL: apiBaseUrl,
-      timeout: 10000,
+      timeout: 30000,
       headers: {
         'Content-Type': 'application/json',
       },
@@ -92,11 +98,23 @@ class ApiService {
         return response;
       },
       (error) => {
+        if (error.response?.status === 403 && isSubscriptionBlockedApiError(error)) {
+          const tenant = extractBlockedTenantFromApiError(error);
+          const responseData = error.response?.data as { error?: string; message?: string } | undefined;
+          const message = responseData?.error || responseData?.message;
+          dispatchSubscriptionBlocked(tenant, message);
+          if (typeof window !== 'undefined' && window.location.pathname !== '/subscribe') {
+            window.location.replace('/subscribe');
+          }
+        }
         if (error.response?.status === 401 && !String(error.config?.url || '').includes('/auth/login')) {
           localStorage.removeItem('token');
           localStorage.removeItem('crm_auth_user');
-          if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-            window.location.href = '/login';
+          if (typeof window !== 'undefined') {
+            const onPublicScreen = ['/login', '/register', '/verify-email', '/', '/welcome', '/auth/yandex/callback'].includes(window.location.pathname);
+            if (!onPublicScreen) {
+              window.location.replace('/login');
+            }
           }
         }
         return Promise.reject(error);
@@ -135,6 +153,11 @@ class ApiService {
 
   async put<T>(url: string, data?: any): Promise<T> {
     const response = await this.api.put<ApiResponse<T> | T>(url, data);
+    return this.unwrapResponse<T>(response);
+  }
+
+  async patch<T>(url: string, data?: any): Promise<T> {
+    const response = await this.api.patch<ApiResponse<T> | T>(url, data);
     return this.unwrapResponse<T>(response);
   }
 

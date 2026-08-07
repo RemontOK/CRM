@@ -9,7 +9,8 @@ const normalizePart = (part: Part): Part => ({
   partType: part.partType || 'spare_part',
   wholesalePrice: typeof part.wholesalePrice === 'number' ? part.wholesalePrice : part.unitPrice,
   alertThreshold: typeof part.alertThreshold === 'number' ? part.alertThreshold : part.minQuantity,
-  notificationsEnabled: part.notificationsEnabled ?? true,
+  notificationsEnabled: part.notificationsEnabled === true,
+  warehouseId: part.warehouseId || '',
   createdAt: new Date(part.createdAt),
   updatedAt: new Date(part.updatedAt),
 });
@@ -52,6 +53,13 @@ class InventoryService {
     localStorage.setItem(STOCK_MOVEMENTS_STORAGE_KEY, JSON.stringify(this.movements));
   }
 
+  clearSession() {
+    this.parts = [];
+    this.movements = [];
+    localStorage.removeItem(PARTS_STORAGE_KEY);
+    localStorage.removeItem(STOCK_MOVEMENTS_STORAGE_KEY);
+  }
+
   async refreshFromApi() {
     try {
       const [parts, movements] = await Promise.all([
@@ -69,6 +77,18 @@ class InventoryService {
       parts: [...this.parts],
       movements: [...this.movements],
     };
+  }
+
+  async refreshPartsOnly() {
+    try {
+      const parts = await apiService.get<Part[]>('/inventory/parts');
+      this.parts = parts.map((part) => normalizePart(part));
+      this.saveToCache();
+    } catch {
+      // keep cache as fallback
+    }
+
+    return [...this.parts];
   }
 
   getParts() {
@@ -171,7 +191,7 @@ class InventoryService {
   }
 
   isLowStock(part: Part) {
-    if (!part.notificationsEnabled) {
+    if (part.notificationsEnabled !== true) {
       return false;
     }
     const threshold = typeof part.alertThreshold === 'number' ? part.alertThreshold : part.minQuantity;

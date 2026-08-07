@@ -16,8 +16,14 @@ import QRCode from 'qrcode';
 import toast from 'react-hot-toast';
 import { AcceptanceAct, PartItem, WorkCompletionAct, WorkItem } from '../../types';
 import { appSettingsService } from '../../services/appSettingsService';
+import { applyTemplateTokenValues } from '../../services/documentTemplateTokens';
+import { buildDocumentWorksTableHtml } from '../../services/documentWorksTable';
+import { buildDocumentClientDataTableHtml } from '../../services/documentClientDataTable';
 import { documentService } from '../../services/documentService';
 import { formatPhone } from '../../utils/phone';
+import { calcEstimatedCompletionDate } from '../../utils/orderDates';
+import { getAcceptanceActCompleteness, getAcceptanceActNotes } from '../../utils/acceptanceActFields';
+import { buildClientDocumentTokenValues } from '../../utils/clientFieldUtils';
 import SignaturePad from '../SignaturePad/SignaturePad';
 
 interface DocumentGeneratorProps {
@@ -28,14 +34,9 @@ interface DocumentGeneratorProps {
   onSign?: (signatureData: string, signerRole: 'client' | 'master') => void;
 }
 
-const company = {
-  title: 'Исполнитель NK Service',
-  owner: 'ИП Неклюдов А. А.',
-  inn: '263221164126',
-  ogrnip: '324265100105224',
-  phone: '+7 (938) 309 18-77',
-  scheduleAcceptance: 'Ежедневно с 10:00 - 19:00',
-  scheduleCompletion: 'Пн - Сб с 10:00 - 19:00, Вс с 12:00 - 19:00',
+const scheduleDefaults = {
+  acceptance: 'Ежедневно с 10:00 - 19:00',
+  completion: 'Пн - Сб с 10:00 - 19:00, Вс с 12:00 - 19:00',
 };
 
 const pageSx = {
@@ -83,6 +84,20 @@ const displayValue = (value?: string | number | null) => {
   return String(value).trim();
 };
 
+const getAcceptanceEstimatedCompletionDate = (act: AcceptanceAct) => {
+  if (act.estimatedCompletionDate) {
+    const date = new Date(act.estimatedCompletionDate);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  if (act.estimatedDays) {
+    return calcEstimatedCompletionDate(act.acceptanceDate, act.estimatedDays);
+  }
+  return null;
+};
+
+const formatAcceptanceEstimatedDate = (act: AcceptanceAct) =>
+  formatDate(getAcceptanceEstimatedCompletionDate(act) || undefined);
+
 const escapeHtml = (value?: string | number | null) =>
   String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -100,42 +115,6 @@ const splitName = (fullName: string) => {
     firstName: parts[0] || '',
     lastName: parts.slice(1).join(' ') || '',
   };
-};
-
-const renderWorksHtml = (works: WorkItem[], warrantyDays = 0) => {
-  if (!works.length) {
-    return '';
-  }
-
-  const baseCellStyle = 'border:1px solid #8da0a6; padding:6px 4px; vertical-align:middle; font-size:11px; line-height:1.2;';
-  const centerCellStyle = `${baseCellStyle} text-align:center;`;
-  const rightCellStyle = `${baseCellStyle} text-align:right;`;
-
-  return works
-    .map(
-      (work, index) => {
-        const rowWarrantyDays = Number(work.warrantyDays ?? warrantyDays) || 0;
-        return `<tr><td style="${centerCellStyle}">${index + 1}</td><td style="${baseCellStyle}">${escapeHtml(work.name)}</td><td style="${centerCellStyle}">${rowWarrantyDays}</td><td style="${rightCellStyle}">${formatMoney(
-          work.cost
-        )}</td><td style="${centerCellStyle}">${work.quantity}</td><td style="${rightCellStyle}">${formatMoney(work.totalCost)}</td></tr>`;
-      }
-    )
-    .join('');
-};
-
-const renderPartsHtml = (parts: PartItem[]) => {
-  if (!parts.length) {
-    return '';
-  }
-
-  return parts
-    .map(
-      (part, index) =>
-        `<tr><td>${index + 1}</td><td>${escapeHtml(part.name)}</td><td>${part.quantity}</td><td>${formatMoney(
-          part.unitPrice
-        )}</td><td>${formatMoney(part.totalPrice)}</td></tr>`
-    )
-    .join('');
 };
 
 const signatureLabelSx = {
@@ -202,8 +181,8 @@ const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
   );
 
   const companyInfo = {
-    companyName: appSettings.business.companyName || 'NK Service',
-    companyPhone: formatPhone(appSettings.business.phone || company.phone),
+    companyName: appSettings.business.companyName || 'Сервисный центр',
+    companyPhone: formatPhone(appSettings.business.phone || ''),
     companyEmail: appSettings.business.email || '',
     companyAddress: appSettings.business.address || '',
     workingHours: appSettings.business.workingHours || '',
@@ -226,60 +205,78 @@ const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
 
     const clientName = `${act.client.firstName} ${act.client.lastName}`.trim();
     const deviceName = [act.device.brand, act.device.model].filter(Boolean).join(' ').trim();
+    const clientFieldTokens = buildClientDocumentTokenValues(act.client, appSettings, escapeHtml);
 
-    return activeTemplate.template
-      .replaceAll(
-        '{{documentTitle}}',
-        escapeHtml(
-          fallbackDocumentTitle(
-            appSettings.documents.acceptanceActTitle || activeTemplate.name,
-            'Акт приема-передачи'
-          )
+    return applyTemplateTokenValues(activeTemplate.template, {
+      '{{НазваниеДокумента}}': escapeHtml(
+        fallbackDocumentTitle(
+          appSettings.documents.acceptanceActTitle || activeTemplate.name,
+          'Акт приема-передачи'
         )
-      )
-      .replaceAll('{{companyName}}', escapeHtml(companyInfo.companyName))
-      .replaceAll('{{companyPhone}}', escapeHtml(companyInfo.companyPhone))
-      .replaceAll('{{companyEmail}}', escapeHtml(companyInfo.companyEmail))
-      .replaceAll('{{companyAddress}}', escapeHtml(companyInfo.companyAddress))
-      .replaceAll('{{workingHours}}', escapeHtml(companyInfo.workingHours))
-      .replaceAll('{{orderNumber}}', escapeHtml(act.orderNumber))
-      .replaceAll('{{orderStatus}}', '')
-      .replaceAll('{{priority}}', '')
-      .replaceAll('{{clientName}}', escapeHtml(clientName))
-      .replaceAll('{{clientPhone}}', escapeHtml(formatPhone(act.client.phone)))
-      .replaceAll('{{clientEmail}}', escapeHtml(act.client.email || ''))
-      .replaceAll('{{clientAddress}}', escapeHtml(act.client.address || ''))
-      .replaceAll('{{device}}', escapeHtml(deviceName))
-      .replaceAll('{{deviceBrand}}', escapeHtml(act.device.brand))
-      .replaceAll('{{deviceModel}}', escapeHtml(act.device.model))
-      .replaceAll('{{color}}', escapeHtml(act.device.color || ''))
-      .replaceAll('{{serialNumber}}', escapeHtml(act.device.serialNumber || ''))
-      .replaceAll('{{imei}}', escapeHtml(act.device.imei || ''))
-      .replaceAll('{{password}}', '')
-      .replaceAll('{{completeness}}', escapeHtml(act.client.address || ''))
-      .replaceAll('{{appearance}}', escapeHtml(act.device.externalCondition || ''))
-      .replaceAll('{{problemDescription}}', escapeHtml(act.problemDescription))
-      .replaceAll('{{diagnosis}}', '')
-      .replaceAll('{{estimatedCost}}', act.preliminaryCost ? formatMoney(act.preliminaryCost) : '')
-      .replaceAll('{{totalCost}}', '')
-      .replaceAll('{{advancePayment}}', act.advancePayment ? formatMoney(act.advancePayment) : '')
-      .replaceAll('{{discount}}', '')
-      .replaceAll('{{paymentMethod}}', '')
-      .replaceAll('{{debt}}', '')
-      .replaceAll('{{works}}', '')
-      .replaceAll('{{worksTableRows}}', '')
-      .replaceAll('{{parts}}', '')
-      .replaceAll('{{technician}}', escapeHtml(act.acceptedBy))
-      .replaceAll('{{intakeManager}}', escapeHtml(act.acceptedBy))
-      .replaceAll('{{deliveryManager}}', '')
-      .replaceAll('{{date}}', escapeHtml(formatDate(act.acceptanceDate)))
-      .replaceAll('{{acceptedAt}}', escapeHtml(formatDate(act.acceptanceDate)))
-      .replaceAll('{{createdAt}}', escapeHtml(formatDate(act.createdAt)))
-      .replaceAll('{{completedAt}}', '')
-      .replaceAll('{{warrantyText}}', escapeHtml(appSettings.documents.warrantyText))
-      .replaceAll('{{footerDisclaimer}}', escapeHtml(appSettings.documents.footerDisclaimer))
-      .replaceAll('{{notes}}', escapeHtml(act.client.notes || ''))
-      .replaceAll('{{recommendations}}', escapeHtml(act.conditions || ''));
+      ),
+      '{{НазваниеКомпании}}': escapeHtml(companyInfo.companyName),
+      '{{ТелефонКомпании}}': escapeHtml(companyInfo.companyPhone),
+      '{{EmailКомпании}}': escapeHtml(companyInfo.companyEmail),
+      '{{АдресКомпании}}': escapeHtml(companyInfo.companyAddress),
+      '{{ЧасыРаботы}}': escapeHtml(companyInfo.workingHours),
+      '{{НомерЗаказа}}': escapeHtml(act.orderNumber),
+      '{{СтатусЗаказа}}': '',
+      '{{Приоритет}}': '',
+      '{{ФИОКлиента}}': escapeHtml(clientName),
+      '{{ТелефонКлиента}}': escapeHtml(formatPhone(act.client.phone)),
+      '{{EmailКлиента}}': escapeHtml(act.client.email || ''),
+      '{{АдресКлиента}}': escapeHtml(act.client.address || ''),
+      '{{Устройство}}': escapeHtml(deviceName),
+      '{{БрендУстройства}}': escapeHtml(act.device.brand),
+      '{{МодельУстройства}}': escapeHtml(act.device.model),
+      '{{Цвет}}': escapeHtml(act.device.color || ''),
+      '{{СерийныйНомер}}': escapeHtml(act.device.serialNumber || ''),
+      '{{IMEI}}': escapeHtml(act.device.imei || ''),
+      '{{Пароль}}': escapeHtml(act.device.password || ''),
+      '{{Комплектация}}': escapeHtml(getAcceptanceActCompleteness(act)),
+      '{{ВнешнийВид}}': escapeHtml(act.device.externalCondition || ''),
+      '{{ОписаниеПроблемы}}': escapeHtml(act.problemDescription),
+      '{{Диагностика}}': '',
+      '{{ОриентировочнаяСтоимость}}': act.preliminaryCost ? formatMoney(act.preliminaryCost) : '',
+      '{{ИтоговаяСтоимость}}': '',
+      '{{Аванс}}': act.advancePayment ? formatMoney(act.advancePayment) : '',
+      '{{Скидка}}': '',
+      '{{СпособОплаты}}': '',
+      '{{Долг}}': '',
+      '{{Работы}}': '',
+      '{{ТаблицаДанныхКлиента}}': buildDocumentClientDataTableHtml({
+        variant: 'acceptance',
+        clientName: `${act.client.firstName} ${act.client.lastName}`.trim(),
+        clientPhone: formatPhone(act.client.phone),
+        notes: getAcceptanceActNotes(act),
+        completeness: getAcceptanceActCompleteness(act),
+        device: [act.device.brand, act.device.model].filter(Boolean).join(' ').trim(),
+        password: act.device.password || '',
+        color: act.device.color || '',
+        imei: act.device.imei || '',
+        serialNumber: act.device.serialNumber || '',
+        appearance: act.device.externalCondition || '',
+        estimatedCost: act.preliminaryCost ? formatMoney(act.preliminaryCost) : '',
+        advance: act.advancePayment ? formatMoney(act.advancePayment) : '',
+        completionDate: formatAcceptanceEstimatedDate(act),
+        problemDescription: act.problemDescription,
+      }),
+      '{{ТаблицаРабот}}': '',
+      '{{Запчасти}}': '',
+      '{{Мастер}}': escapeHtml(act.acceptedBy),
+      '{{МенеджерПриёма}}': escapeHtml(act.acceptedBy),
+      '{{МенеджерВыдачи}}': '',
+      '{{Дата}}': escapeHtml(formatDate(act.acceptanceDate)),
+      '{{ДатаПриёма}}': escapeHtml(formatDate(act.acceptanceDate)),
+      '{{ДатаСоздания}}': escapeHtml(formatDate(act.createdAt)),
+      '{{ДатаЗавершения}}': escapeHtml(formatAcceptanceEstimatedDate(act)),
+      '{{ОриентировочныйСрокРемонта}}': escapeHtml(formatAcceptanceEstimatedDate(act)),
+      '{{ТекстГарантии}}': escapeHtml(appSettings.documents.warrantyText),
+      '{{ТекстВПодвале}}': escapeHtml(appSettings.documents.footerDisclaimer),
+      '{{Заметки}}': escapeHtml(getAcceptanceActNotes(act)),
+      '{{Рекомендации}}': escapeHtml(act.conditions || ''),
+      ...clientFieldTokens,
+    });
   };
 
   const buildCompletionTemplateHtml = (act: WorkCompletionAct) => {
@@ -291,59 +288,80 @@ const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
     const deviceName = [act.device.brand, act.device.model].filter(Boolean).join(' ').trim();
     const worksText = act.worksPerformed.map((item) => item.name).join(', ');
     const partsText = act.partsUsed.map((item) => item.name).join(', ');
+    const clientFieldTokens = buildClientDocumentTokenValues(act.client, appSettings, escapeHtml);
 
-    return activeTemplate.template
-      .replaceAll(
-        '{{documentTitle}}',
-        escapeHtml(
-          fallbackDocumentTitle(
-            appSettings.documents.completionActTitle || activeTemplate.name,
-            'Акт выполненных работ'
-          )
+    return applyTemplateTokenValues(activeTemplate.template, {
+      '{{НазваниеДокумента}}': escapeHtml(
+        fallbackDocumentTitle(
+          appSettings.documents.completionActTitle || activeTemplate.name,
+          'Акт выполненных работ'
         )
-      )
-      .replaceAll('{{companyName}}', escapeHtml(companyInfo.companyName))
-      .replaceAll('{{companyPhone}}', escapeHtml(companyInfo.companyPhone))
-      .replaceAll('{{companyEmail}}', escapeHtml(companyInfo.companyEmail))
-      .replaceAll('{{companyAddress}}', escapeHtml(companyInfo.companyAddress))
-      .replaceAll('{{workingHours}}', escapeHtml(companyInfo.workingHours))
-      .replaceAll('{{orderNumber}}', escapeHtml(act.orderNumber))
-      .replaceAll('{{orderStatus}}', '')
-      .replaceAll('{{priority}}', '')
-      .replaceAll('{{clientName}}', escapeHtml(clientName))
-      .replaceAll('{{clientPhone}}', escapeHtml(formatPhone(act.client.phone)))
-      .replaceAll('{{clientEmail}}', escapeHtml(act.client.email || ''))
-      .replaceAll('{{clientAddress}}', escapeHtml(act.client.address || ''))
-      .replaceAll('{{device}}', escapeHtml(deviceName))
-      .replaceAll('{{deviceBrand}}', escapeHtml(act.device.brand))
-      .replaceAll('{{deviceModel}}', escapeHtml(act.device.model))
-      .replaceAll('{{color}}', escapeHtml(act.device.color || ''))
-      .replaceAll('{{serialNumber}}', escapeHtml(act.device.serialNumber || ''))
-      .replaceAll('{{imei}}', escapeHtml(act.device.imei || ''))
-      .replaceAll('{{password}}', '')
-      .replaceAll('{{completeness}}', escapeHtml(act.client.address || ''))
-      .replaceAll('{{appearance}}', escapeHtml(act.device.externalCondition || ''))
-      .replaceAll('{{problemDescription}}', escapeHtml(worksText))
-      .replaceAll('{{diagnosis}}', '')
-      .replaceAll('{{estimatedCost}}', '')
-      .replaceAll('{{totalCost}}', formatMoney(act.totalCost))
-      .replaceAll('{{advancePayment}}', '')
-      .replaceAll('{{discount}}', '0')
-      .replaceAll('{{paymentMethod}}', '')
-      .replaceAll('{{debt}}', '')
-      .replaceAll('{{works}}', escapeHtml(worksText))
-      .replaceAll('{{worksTableRows}}', renderWorksHtml(act.worksPerformed, act.warrantyPeriod))
-      .replaceAll('{{parts}}', escapeHtml(partsText))
-      .replaceAll('{{technician}}', escapeHtml(act.completedBy))
-      .replaceAll('{{intakeManager}}', '')
-      .replaceAll('{{deliveryManager}}', escapeHtml(act.completedBy))
-      .replaceAll('{{date}}', escapeHtml(formatDate(act.completionDate)))
-      .replaceAll('{{createdAt}}', escapeHtml(formatDate(act.createdAt)))
-      .replaceAll('{{completedAt}}', escapeHtml(formatDate(act.completionDate)))
-      .replaceAll('{{warrantyText}}', escapeHtml(appSettings.documents.warrantyText))
-      .replaceAll('{{footerDisclaimer}}', escapeHtml(appSettings.documents.footerDisclaimer))
-      .replaceAll('{{notes}}', escapeHtml(act.client.notes || ''))
-      .replaceAll('{{recommendations}}', '');
+      ),
+      '{{НазваниеКомпании}}': escapeHtml(companyInfo.companyName),
+      '{{ТелефонКомпании}}': escapeHtml(companyInfo.companyPhone),
+      '{{EmailКомпании}}': escapeHtml(companyInfo.companyEmail),
+      '{{АдресКомпании}}': escapeHtml(companyInfo.companyAddress),
+      '{{ЧасыРаботы}}': escapeHtml(companyInfo.workingHours),
+      '{{НомерЗаказа}}': escapeHtml(act.orderNumber),
+      '{{СтатусЗаказа}}': '',
+      '{{Приоритет}}': '',
+      '{{ФИОКлиента}}': escapeHtml(clientName),
+      '{{ТелефонКлиента}}': escapeHtml(formatPhone(act.client.phone)),
+      '{{EmailКлиента}}': escapeHtml(act.client.email || ''),
+      '{{АдресКлиента}}': escapeHtml(act.client.address || ''),
+      '{{Устройство}}': escapeHtml(deviceName),
+      '{{БрендУстройства}}': escapeHtml(act.device.brand),
+      '{{МодельУстройства}}': escapeHtml(act.device.model),
+      '{{Цвет}}': escapeHtml(act.device.color || ''),
+      '{{СерийныйНомер}}': escapeHtml(act.device.serialNumber || ''),
+      '{{IMEI}}': escapeHtml(act.device.imei || ''),
+      '{{Пароль}}': escapeHtml(act.device.password || ''),
+      '{{Комплектация}}': escapeHtml(act.client.address || ''),
+      '{{ВнешнийВид}}': escapeHtml(act.device.externalCondition || ''),
+      '{{ОписаниеПроблемы}}': escapeHtml(worksText),
+      '{{Диагностика}}': '',
+      '{{ОриентировочнаяСтоимость}}': '',
+      '{{ИтоговаяСтоимость}}': formatMoney(act.totalCost),
+      '{{Аванс}}': '',
+      '{{Скидка}}': '0',
+      '{{СпособОплаты}}': '',
+      '{{Долг}}': '',
+      '{{Работы}}': escapeHtml(worksText),
+      '{{ТаблицаДанныхКлиента}}': buildDocumentClientDataTableHtml({
+        variant: 'completion',
+        clientName,
+        clientPhone: formatPhone(act.client.phone),
+        completeness: act.client.address || '',
+        device: deviceName,
+        password: act.device.password || '',
+        color: act.device.color || '',
+        imei: act.device.imei || '',
+        serialNumber: act.device.serialNumber || '',
+        appearance: act.device.externalCondition || '',
+        advance: '',
+        problemDescription: worksText,
+        warrantyText: appSettings.documents.warrantyText,
+      }),
+      '{{ТаблицаРабот}}': buildDocumentWorksTableHtml(
+        act.worksPerformed,
+        act.partsUsed,
+        act.warrantyPeriod,
+        act.totalCost
+      ),
+      '{{Запчасти}}': escapeHtml(partsText),
+      '{{Мастер}}': escapeHtml(act.completedBy),
+      '{{МенеджерПриёма}}': '',
+      '{{МенеджерВыдачи}}': escapeHtml(act.completedBy),
+      '{{Дата}}': escapeHtml(formatDate(act.completionDate)),
+      '{{ДатаСоздания}}': escapeHtml(formatDate(act.createdAt)),
+      '{{ДатаЗавершения}}': escapeHtml(formatDate(act.completionDate)),
+      '{{ДатаПриёма}}': '',
+      '{{ТекстГарантии}}': escapeHtml(appSettings.documents.warrantyText),
+      '{{ТекстВПодвале}}': escapeHtml(appSettings.documents.footerDisclaimer),
+      '{{Заметки}}': escapeHtml(act.client.notes || ''),
+      '{{Рекомендации}}': '',
+      ...clientFieldTokens,
+    });
   };
 
   const buildPdf = async () => {
@@ -451,12 +469,17 @@ const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
       </Box>
 
       <Box sx={{ fontSize: '12px', lineHeight: 1.55 }}>
-        <Typography sx={{ fontSize: '12px', fontWeight: 700, mb: 0.6 }}>{company.title}</Typography>
-        <Typography sx={{ fontSize: '12px' }}>{company.owner}</Typography>
-        <Typography sx={{ fontSize: '12px' }}>ИНН: {company.inn}</Typography>
-        <Typography sx={{ fontSize: '12px' }}>ОГРНИП: {company.ogrnip}</Typography>
-        <Typography sx={{ fontSize: '12px' }}>Тел. {company.phone}</Typography>
-        <Typography sx={{ fontSize: '12px' }}>{schedule}</Typography>
+        <Typography sx={{ fontSize: '12px', fontWeight: 700, mb: 0.6 }}>{companyInfo.companyName}</Typography>
+        {companyInfo.companyAddress ? (
+          <Typography sx={{ fontSize: '12px' }}>{companyInfo.companyAddress}</Typography>
+        ) : null}
+        {companyInfo.companyPhone ? (
+          <Typography sx={{ fontSize: '12px' }}>Тел. {companyInfo.companyPhone}</Typography>
+        ) : null}
+        {companyInfo.companyEmail ? (
+          <Typography sx={{ fontSize: '12px' }}>{companyInfo.companyEmail}</Typography>
+        ) : null}
+        <Typography sx={{ fontSize: '12px' }}>{schedule || companyInfo.workingHours}</Typography>
       </Box>
     </Box>
   );
@@ -479,13 +502,13 @@ const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
   const renderAcceptance = (act: AcceptanceAct) => {
     const acceptanceDate = formatDate(act.acceptanceDate);
     const clientName = `${act.client.firstName} ${act.client.lastName}`.trim();
-    const expectedDate = formatDate(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000));
+    const expectedDate = formatAcceptanceEstimatedDate(act);
     const prepay = Number(act.advancePayment || 0);
     const deviceName = [act.device.brand, act.device.model].filter(Boolean).join(' ').trim();
 
     return (
       <Box id="document-content" sx={pageSx}>
-        {renderTop('Акт приема - передачи', 'Следите за статусом вашего заказа', acceptanceDate, company.scheduleAcceptance)}
+        {renderTop('Акт приема - передачи', 'Следите за статусом вашего заказа', acceptanceDate, companyInfo.workingHours || scheduleDefaults.acceptance)}
 
         <Box component="table" sx={tableSx}>
           <Box component="thead">
@@ -500,12 +523,12 @@ const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
               <Box component="td" sx={cellSx}>
                 <InfoLine label="ФИО Клиента:" value={displayValue(clientName)} />
                 <InfoLine label="Номер телефона клиента:" value={displayValue(act.client.phone)} />
-                <InfoLine label="Комплектация:" value={displayValue(act.client.address)} />
-                <InfoLine label="Заметки:" value={displayValue(act.client.notes)} />
+                <InfoLine label="Комплектация:" value={displayValue(getAcceptanceActCompleteness(act))} />
+                <InfoLine label="Заметки:" value={displayValue(getAcceptanceActNotes(act))} />
               </Box>
               <Box component="td" sx={cellSx}>
                 <InfoLine label="Устройство:" value={displayValue(deviceName)} />
-                <InfoLine label="Пароль:" value="" />
+                <InfoLine label="пароль:" value={displayValue(act.device.password)} />
                 <InfoLine label="Цвет:" value={displayValue(act.device.color)} />
                 <InfoLine label="IMEI:" value={displayValue(act.device.imei)} />
                 <InfoLine label="S/N:" value={displayValue(act.device.serialNumber)} />
@@ -649,7 +672,7 @@ const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
 
     return (
       <Box id="document-content" sx={pageSx}>
-        {renderTop('Акт выполненных работ', 'Оставьте отзыв', completionDate ? `от ${completionDate}` : 'от', company.scheduleCompletion)}
+        {renderTop('Акт выполненных работ', 'Оставьте отзыв', completionDate ? `от ${completionDate}` : 'от', companyInfo.workingHours || scheduleDefaults.completion)}
 
         <Box component="table" sx={tableSx}>
           <Box component="thead">
@@ -668,7 +691,7 @@ const DocumentGenerator: React.FC<DocumentGeneratorProps> = ({
               </Box>
               <Box component="td" sx={cellSx}>
                 <InfoLine label="Устройство:" value={displayValue(deviceName)} />
-                <InfoLine label="Пароль:" value="" />
+                <InfoLine label="пароль:" value={displayValue(act.device.password)} />
                 <InfoLine label="Цвет:" value={displayValue(act.device.color)} />
                 <InfoLine label="IMEI:" value={displayValue(act.device.imei)} />
                 <InfoLine label="S/N:" value={displayValue(act.device.serialNumber)} />

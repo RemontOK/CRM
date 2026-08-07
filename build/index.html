@@ -4,10 +4,12 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#000000" />
-    <meta
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <meta name="theme-color" content="#000000" />    <meta
       name="description"
-      content="CRM система для сервисного центра НЭК сервис"
+      content="CRM для сервисного центра"
     />
     <link
       rel="stylesheet"
@@ -17,12 +19,87 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/icon?family=Material+Icons"
     />
-    <title>НЭК Сервис - CRM</title>
-    <script type="module" crossorigin src="/assets/index-zMmV6Vy4.js"></script>
-    <link rel="modulepreload" crossorigin href="/assets/vendor-Ckhrjn13.js">
-    <link rel="modulepreload" crossorigin href="/assets/mui-COZzzynO.js">
-    <link rel="modulepreload" crossorigin href="/assets/router-CKiPcwDn.js">
+    <title>CRM для сервисного центра</title>
+    
+    <script type="module" crossorigin src="/assets/index-C6hv_eEA.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-CDS4DQk9.css">
+  <script>
+      (function () {
+        var buildKey = 'crm_build_id';
+        var reloadPrefix = 'crm_build_reload_';
+        var chunkReloadKey = 'crm_chunk_reload_once';
+
+        function reloadOnce(reason) {
+          if (sessionStorage.getItem(chunkReloadKey) === '1') {
+            return;
+          }
+          sessionStorage.setItem(chunkReloadKey, '1');
+          var url = new URL(window.location.href);
+          url.searchParams.set('_v', reason || String(Date.now()));
+          window.location.replace(url.toString());
+        }
+
+        function isChunkErrorMessage(message) {
+          var value = String(message || '').toLowerCase();
+          return (
+            value.includes('does not provide an export') ||
+            value.includes('failed to fetch dynamically imported module') ||
+            value.includes('importing a module script failed') ||
+            value.includes('loading chunk') ||
+            value.includes('mime type') ||
+            value.includes('err_cache') ||
+            value.includes('useauth must be used within an authprovider') ||
+            value.includes('before initialization') ||
+            value.includes('reading \'usecontext\'') ||
+            value.includes('minified react error #321') ||
+            value.includes('invalid hook call')
+          );
+        }
+
+        window.addEventListener(
+          'error',
+          function (event) {
+            if (isChunkErrorMessage(event.message)) {
+              reloadOnce('chunk');
+            }
+          },
+          true
+        );
+
+        window.addEventListener('unhandledrejection', function (event) {
+          var reason = event.reason;
+          var message =
+            reason && reason.message ? String(reason.message) : String(reason || '');
+          if (isChunkErrorMessage(message)) {
+            reloadOnce('chunk');
+          }
+        });
+
+        try {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', '/build-version.json?_=' + Date.now(), false);
+          xhr.setRequestHeader('Cache-Control', 'no-cache');
+          xhr.send(null);
+          if (xhr.status === 200) {
+            var payload = JSON.parse(xhr.responseText);
+            var buildId = payload && payload.id ? String(payload.id) : '';
+            if (buildId) {
+              var stored = sessionStorage.getItem(buildKey);
+              if (stored && stored !== buildId && !sessionStorage.getItem(reloadPrefix + buildId)) {
+                sessionStorage.setItem(buildKey, buildId);
+                sessionStorage.setItem(reloadPrefix + buildId, '1');
+                var url = new URL(window.location.href);
+                url.searchParams.set('_v', buildId);
+                window.location.replace(url.toString());
+                return;
+              }
+              sessionStorage.setItem(buildKey, buildId);
+              sessionStorage.removeItem(chunkReloadKey);
+            }
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <noscript>Вам необходимо включить JavaScript для работы этого приложения.</noscript>

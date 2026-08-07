@@ -6,9 +6,17 @@ interface PeriodFilterProps {
   value: PeriodFilterValue;
   onChange: (next: PeriodFilterValue) => void;
   presetLabel?: string;
+  size?: 'small' | 'medium';
+  md?: number;
 }
 
-const PeriodFilter: React.FC<PeriodFilterProps> = ({ value, onChange, presetLabel = 'Период' }) => {
+const PeriodFilter: React.FC<PeriodFilterProps> = ({
+  value,
+  onChange,
+  presetLabel = 'Период',
+  size = 'small',
+  md = 2,
+}) => {
   const handlePresetChange = (preset: PeriodPreset) => {
     onChange({
       preset,
@@ -19,10 +27,12 @@ const PeriodFilter: React.FC<PeriodFilterProps> = ({ value, onChange, presetLabe
 
   return (
     <>
-      <Grid item xs={12} md={2}>
-        <FormControl fullWidth>
-          <InputLabel>{presetLabel}</InputLabel>
+      <Grid item xs={12} md={md}>
+        <FormControl fullWidth size={size}>
+          <InputLabel id="period-filter-label">{presetLabel}</InputLabel>
           <Select
+            labelId="period-filter-label"
+            size={size}
             value={value.preset}
             label={presetLabel}
             onChange={(event) => handlePresetChange(event.target.value as PeriodPreset)}
@@ -40,9 +50,10 @@ const PeriodFilter: React.FC<PeriodFilterProps> = ({ value, onChange, presetLabe
 
       {value.preset === 'custom' && (
         <>
-          <Grid item xs={12} md={2}>
+          <Grid item xs={12} md={md}>
             <TextField
               fullWidth
+              size={size}
               label="С даты"
               type="date"
               value={value.from}
@@ -50,9 +61,10 @@ const PeriodFilter: React.FC<PeriodFilterProps> = ({ value, onChange, presetLabe
               InputLabelProps={{ shrink: true }}
             />
           </Grid>
-          <Grid item xs={12} md={2}>
+          <Grid item xs={12} md={md}>
             <TextField
               fullWidth
+              size={size}
               label="По дату"
               type="date"
               value={value.to}

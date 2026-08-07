@@ -11,6 +11,7 @@ import {
   ListItemText,
   Stack,
   Typography,
+  useTheme,
 } from '@mui/material';
 import {
   AttachMoney,
@@ -21,6 +22,8 @@ import {
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../../hooks/useAuth';
+import { useCompanyName } from '../../hooks/useCompanyName';
 import {
   Bar,
   BarChart,
@@ -40,18 +43,46 @@ import { cashService } from '../../services/cashService';
 import { clientService } from '../../services/clientService';
 import { orderService } from '../../services/orderService';
 import { heroCardSx, pageShellSx, panelCardSx } from '../../styles/ui';
+import { useCrmAppearance } from '../../context/CrmThemeProvider';
 import { getOrderTotal } from '../../utils/orderMetrics';
 
 const monthFormatter = new Intl.DateTimeFormat('ru-RU', { month: 'short' });
 
 const Dashboard: React.FC = () => {
+  const theme = useTheme();
+  const chartTooltipProps = {
+    contentStyle: {
+      backgroundColor: theme.palette.background.paper,
+      border: `1px solid ${theme.palette.divider}`,
+      borderRadius: 8,
+      boxShadow: theme.shadows[4],
+    },
+    labelStyle: {
+      color: theme.palette.text.primary,
+      fontWeight: 700,
+      marginBottom: 4,
+    },
+    itemStyle: {
+      color: theme.palette.text.primary,
+    },
+  };
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const companyName = useCompanyName();
+  const { colors } = useCrmAppearance();
   const [ordersData, setOrdersData] = useState<Order[]>([]);
   const [clientsData, setClientsData] = useState<Client[]>([]);
   const [cashOperations, setCashOperations] = useState<CashOperation[]>([]);
 
   useEffect(() => {
+    if (!user?.tenantId) {
+      return;
+    }
+
     const loadDashboard = async () => {
+      setOrdersData([]);
+      setClientsData([]);
+      setCashOperations([]);
       await Promise.all([
         clientService.refreshFromApi(),
         cashService.refreshFromApi(),
@@ -63,7 +94,7 @@ const Dashboard: React.FC = () => {
     };
 
     void loadDashboard();
-  }, []);
+  }, [user?.tenantId]);
 
   const activeOrders = useMemo(
     () => ordersData.filter((order) => !['completed', 'cancelled'].includes(order.status)),
@@ -186,11 +217,11 @@ const Dashboard: React.FC = () => {
 
   const workloads = useMemo(() => {
     const statusMap: Record<string, { name: string; value: number; color: string }> = {
-      diagnosis: { name: 'Диагностика', value: 0, color: '#2563eb' },
-      waiting_parts: { name: 'Ждут запчасти', value: 0, color: '#ea580c' },
-      waiting_client: { name: 'Ждут клиента', value: 0, color: '#0f766e' },
+      diagnosis: { name: 'Диагностика', value: 0, color: colors.info },
+      waiting_parts: { name: 'Ждут запчасти', value: 0, color: colors.primary },
+      waiting_client: { name: 'Ждут клиента', value: 0, color: colors.secondary },
       in_progress: { name: 'В работе', value: 0, color: '#7c3aed' },
-      ready: { name: 'Готовы', value: 0, color: '#16a34a' },
+      ready: { name: 'Готовы', value: 0, color: colors.success },
       completed: { name: 'Завершены', value: 0, color: '#475569' },
     };
 
@@ -201,7 +232,7 @@ const Dashboard: React.FC = () => {
     });
 
     return Object.values(statusMap).filter((item) => item.value > 0);
-  }, [ordersData]);
+  }, [ordersData, colors]);
 
   const workshopQueue = useMemo(
     () => [
@@ -242,7 +273,7 @@ const Dashboard: React.FC = () => {
     <Box sx={pageShellSx}>
       <Box sx={heroCardSx}>
         <Typography variant="overline" sx={{ color: 'rgba(255,255,255,0.68)', letterSpacing: 1.4 }}>
-          НЭК СЕРВИС · ОПЕРАЦИОННЫЙ ОБЗОР
+          {companyName.toUpperCase()} · ОПЕРАЦИОННЫЙ ОБЗОР
         </Typography>
         <Typography variant="h3" sx={{ mt: 1.5, mb: 1.5, color: 'common.white' }}>
           Сводка по сервисному центру
@@ -270,7 +301,7 @@ const Dashboard: React.FC = () => {
                         {item.note}
                       </Typography>
                     </Box>
-                    <Avatar sx={{ bgcolor: 'rgba(234, 88, 12, 0.12)', color: 'primary.main' }}>{item.icon}</Avatar>
+                    <Avatar sx={{ bgcolor: 'var(--crm-color-primary-soft)', color: 'primary.main' }}>{item.icon}</Avatar>
                   </Stack>
                 </CardContent>
               </Card>
@@ -327,8 +358,11 @@ const Dashboard: React.FC = () => {
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(15,23,42,0.08)" />
                     <XAxis dataKey="month" />
                     <YAxis />
-                    <Tooltip formatter={(value: number) => `${value.toLocaleString('ru-RU')} ₽`} />
-                    <Line type="monotone" dataKey="revenue" stroke="#ea580c" strokeWidth={3} dot={{ r: 5 }} />
+                    <Tooltip
+                      {...chartTooltipProps}
+                      formatter={(value: number) => [`${value.toLocaleString('ru-RU')} ₽`, 'Выручка']}
+                    />
+                    <Line type="monotone" dataKey="revenue" name="Выручка" stroke={colors.primary} strokeWidth={3} dot={{ r: 5 }} />
                   </LineChart>
                 </ResponsiveContainer>
               </Box>
@@ -352,7 +386,10 @@ const Dashboard: React.FC = () => {
                           <Cell key={item.name} fill={item.color} />
                         ))}
                       </Pie>
-                      <Tooltip formatter={(value: number) => `${value} шт.`} />
+                      <Tooltip
+                        {...chartTooltipProps}
+                        formatter={(value: number) => [`${value} шт.`, 'Заказов']}
+                      />
                     </PieChart>
                   </ResponsiveContainer>
                 ) : (
@@ -380,8 +417,12 @@ const Dashboard: React.FC = () => {
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(15,23,42,0.08)" />
                     <XAxis dataKey="stage" hide />
                     <YAxis />
-                    <Tooltip formatter={(value: number) => `${value} шт.`} />
-                    <Bar dataKey="count" fill="#0f766e" radius={[8, 8, 0, 0]} />
+                    <Tooltip
+                      {...chartTooltipProps}
+                      formatter={(value: number) => [`${value} шт.`, 'Количество']}
+                      labelFormatter={(label) => String(label)}
+                    />
+                    <Bar dataKey="count" name="Количество" fill={colors.secondary} radius={[8, 8, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </Box>
@@ -427,15 +468,16 @@ const Dashboard: React.FC = () => {
                             </Stack>
                           }
                           secondary={
-                            <Box component="div" sx={{ mt: 0.75 }}>
-                              <Typography component="div" variant="body2" color="text.primary">
-                                {order.client} В· {order.device}
+                            <Box sx={{ mt: 0.75 }}>
+                              <Typography variant="body2" color="text.primary">
+                                {order.client} · {order.device}
                               </Typography>
                               <Box sx={{ mt: 0.75 }}>
                                 <Chip label={order.status} size="small" color="primary" variant="outlined" />
                               </Box>
                             </Box>
                           }
+                          secondaryTypographyProps={{ component: 'div' }}
                         />
                       </ListItem>
                     ))}

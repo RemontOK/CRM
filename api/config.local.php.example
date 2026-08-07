@@ -13,7 +13,38 @@ return [
     ],
     'app' => [
         'base_path' => '/api',
-        'cors_origin' => 'https://nakcrm.ru',
+        'cors_origin' => [
+            'https://nakcrm.ru',
+            'https://www.nakcrm.ru',
+            'http://localhost:5173',
+            'http://127.0.0.1:5173',
+        ],
         'token_ttl_days' => 30,
+        // Email пользователя с правами владельца платформы (super-admin)
+        'platform_admin_email' => 'admin@nakcrm.ru',
+        'public_url' => 'https://nakcrm.ru',
+        // Яндекс OAuth: https://oauth.yandex.ru/client/new
+        'yandex_client_id' => '',
+        'yandex_client_secret' => '',
+        'yandex_redirect_uri' => 'https://nakcrm.ru/auth/yandex/callback',
+    ],
+    'mail' => [
+        // Отправка писем подтверждения email
+        'enabled' => true,
+        'from_email' => 'noreply@nakcrm.ru',
+        'from_name' => 'NAK CRM',
+        // Если smtp_host пустой — используется PHP mail()
+        'smtp_host' => '',
+        'smtp_port' => 587,
+        'smtp_username' => '',
+        'smtp_password' => '',
+        'smtp_encryption' => 'tls',
+    ],
+    // ЮMoney — оплата подписки CRM
+    // Настройки кошелька: https://yoomoney.ru/transfer/myservices/http-notification
+    'yoomoney' => [
+        'wallet' => '',
+        'notification_secret' => '', // секрет HTTP-уведомлений из кошелька
+        'monthly_price' => 0, // 0 = цена из subscription_plans в БД (по умолчанию 2290 ₽)
     ],
 ];

@@ -9,6 +9,14 @@ if (!file_exists($configFile)) {
 
 $config = require $configFile;
 
+$overlayPath = __DIR__ . '/config.yoomoney.php';
+if (file_exists($overlayPath)) {
+    $overlay = require $overlayPath;
+    if (is_array($overlay)) {
+        $config = array_replace_recursive($config, $overlay);
+    }
+}
+
 function app_config(?string $section = null): array
 {
     global $config;
@@ -89,10 +97,17 @@ function ensure_runtime_schema(PDO $pdo, string $databaseName): void
     $ensureColumn('inventory_parts', 'subcategory', "VARCHAR(255) NOT NULL DEFAULT ''");
     $ensureColumn('inventory_parts', 'part_type', "VARCHAR(32) NOT NULL DEFAULT 'spare_part'");
     $ensureColumn('inventory_parts', 'alert_threshold', "INT NOT NULL DEFAULT 0");
-    $ensureColumn('inventory_parts', 'notifications_enabled', 'TINYINT(1) NOT NULL DEFAULT 1');
+    $ensureColumn('inventory_parts', 'notifications_enabled', 'TINYINT(1) NOT NULL DEFAULT 0');
     $ensureColumn('inventory_parts', 'wholesale_price', 'DECIMAL(12,2) NOT NULL DEFAULT 0');
     $ensureColumn('inventory_parts', 'supplier_contact', "VARCHAR(255) NOT NULL DEFAULT ''");
     $ensureColumn('inventory_parts', 'location_name', "VARCHAR(255) NOT NULL DEFAULT ''");
+    $ensureColumn('inventory_parts', 'warehouse_id', "VARCHAR(255) NOT NULL DEFAULT ''");
+    $ensureColumn('users', 'avatar', "LONGTEXT NOT NULL");
+    $ensureColumn('users', 'access_json', 'TEXT NULL');
+    $ensureColumn('orders', 'is_warranty', 'TINYINT(1) NOT NULL DEFAULT 0');
+    $ensureColumn('orders', 'device_password', "VARCHAR(255) NOT NULL DEFAULT ''");
+    $ensureColumn('clients', 'telegram_chat_id', "VARCHAR(64) NOT NULL DEFAULT ''");
+    $ensureColumn('clients', 'custom_fields_json', 'TEXT NULL');
 }
 
 function json_input(): array
@@ -203,12 +218,63 @@ function require_auth(): array
         json_error('Срок действия сессии истек', 401);
     }
 
+    $GLOBALS['__current_auth_user'] = $user;
+
+    return $user;
+}
+
+function require_admin(): array
+{
+    $user = require_auth();
+    if (($user['role'] ?? '') !== 'admin') {
+        json_error('Доступ запрещён: требуется роль администратора', 403);
+    }
     return $user;
 }
 
 function now_mysql(): string
 {
     return date('Y-m-d H:i:s');
+}
+
+function to_mysql_datetime($value, ?string $fallback = null): ?string
+{
+    if ($value === null || $value === '') {
+        return $fallback;
+    }
+
+    $value = is_string($value) ? trim($value) : $value;
+
+    if ($value instanceof DateTimeInterface) {
+        return $value->format('Y-m-d H:i:s');
+    }
+
+    if (is_numeric($value)) {
+        $timestamp = (int) $value;
+        if ($timestamp > 0) {
+            return date('Y-m-d H:i:s', $timestamp);
+        }
+        return $fallback;
+    }
+
+    if (!is_string($value)) {
+        return $fallback;
+    }
+
+    if (preg_match('/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/', $value)) {
+        $normalized = str_replace('T', ' ', $value);
+        $parsed = DateTime::createFromFormat('Y-m-d H:i:s', substr($normalized, 0, 19));
+        if ($parsed instanceof DateTime) {
+            return $parsed->format('Y-m-d H:i:s');
+        }
+    }
+
+    $timestamp = strtotime($value);
+    if ($timestamp !== false && $timestamp > 0) {
+        return date('Y-m-d H:i:s', $timestamp);
+    }
+
+    return $fallback;
 }
 
 function uuid_token(): string

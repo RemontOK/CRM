@@ -10,6 +10,7 @@
   WorkItem,
 } from '../types';
 import { apiService } from './api';
+import { calcEstimatedCompletionDate } from '../utils/orderDates';
 
 const ACCEPTANCE_CACHE_KEY = 'crm_acceptance_acts';
 const COMPLETION_CACHE_KEY = 'crm_work_completion_acts';
@@ -25,6 +26,8 @@ const normalizeSignature = (signature?: ElectronicSignature | null): ElectronicS
 
 const normalizeAcceptanceAct = (act: AcceptanceAct): AcceptanceAct => ({
   ...act,
+  estimatedDays: act.estimatedDays ? Number(act.estimatedDays) : undefined,
+  estimatedCompletionDate: act.estimatedCompletionDate ? String(act.estimatedCompletionDate) : undefined,
   acceptanceDate: new Date(act.acceptanceDate),
   createdAt: new Date(act.createdAt),
   updatedAt: new Date(act.updatedAt),
@@ -79,6 +82,15 @@ class DocumentService {
     localStorage.setItem(STORAGE_CACHE_KEY, JSON.stringify(this.documentStorage));
   }
 
+  clearSession() {
+    this.acceptanceActs = [];
+    this.workCompletionActs = [];
+    this.documentStorage = [];
+    localStorage.removeItem(ACCEPTANCE_CACHE_KEY);
+    localStorage.removeItem(COMPLETION_CACHE_KEY);
+    localStorage.removeItem(STORAGE_CACHE_KEY);
+  }
+
   private syncAcceptance(acts: AcceptanceAct[]) {
     this.acceptanceActs = acts.map(normalizeAcceptanceAct);
     this.saveCache();
@@ -104,6 +116,13 @@ class DocumentService {
     conditions = 'Устройство принимается на бесплатную диагностику и ремонт.',
     advancePayment = 0
   ): Promise<AcceptanceAct> {
+    const acceptanceDate = new Date().toISOString();
+    const estimatedDays = Math.max(1, Number(order.estimatedDays) || 1);
+    const estimatedCompletionDate = calcEstimatedCompletionDate(
+      order.createdAt || acceptanceDate,
+      estimatedDays
+    ).toISOString();
+
     const payload = {
       orderId: order.id,
       orderNumber: order.orderNumber,
@@ -112,7 +131,9 @@ class DocumentService {
       problemDescription,
       preliminaryCost,
       advancePayment,
-      acceptanceDate: new Date().toISOString(),
+      estimatedDays,
+      estimatedCompletionDate,
+      acceptanceDate,
       acceptedBy,
       conditions,
     };

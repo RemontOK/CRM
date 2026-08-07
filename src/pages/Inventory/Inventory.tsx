@@ -1,5 +1,18 @@
-﻿import React, { useEffect, useMemo, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import InventoryPartFormDialog from '../../components/Inventory/InventoryPartFormDialog';
+import InventoryReceiptDialog from '../../components/Inventory/InventoryReceiptDialog';
+import InventoryWriteoffDialog from '../../components/Inventory/InventoryWriteoffDialog';
+import InventorySellDialog from '../../components/Inventory/InventorySellDialog';
 import {
+  PartFormState,
+  ReceiptFormValues,
+  SellFormValues,
+  WriteoffFormValues,
+  emptyPartForm,
+} from '../../components/Inventory/inventoryPartFormTypes';
+import {
+  Alert,
   Autocomplete,
   Avatar,
   Box,
@@ -19,6 +32,7 @@ import {
   InputLabel,
   MenuItem,
   Select,
+  Stack,
   Switch,
   TextField,
   Typography,
@@ -29,6 +43,7 @@ import {
   Delete,
   Edit,
   FilterList,
+  ImportExport,
   Inventory,
   LocalShipping,
   ReceiptLong,
@@ -37,55 +52,55 @@ import {
   Warning,
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
-import { DataGrid, GridColDef } from '@mui/x-data-grid';
 import axios from 'axios';
 import toast from 'react-hot-toast';
+import { useNavigate } from 'react-router-dom';
 import { Order, OrderPart, Part, StockMovement, TaxonomyNode } from '../../types';
+import { appSettingsService } from '../../services/appSettingsService';
 import { inventoryService } from '../../services/inventoryService';
 import { taxonomyService } from '../../services/taxonomyService';
 import { orderService } from '../../services/orderService';
-
-type PartFormState = {
-  partType: 'spare_part' | 'accessory' | 'product';
-  name: string;
-  partNumber: string;
-  category: string;
-  subcategory: string;
-  brand: string;
-  model: string;
-  quantity: string;
-  minQuantity: string;
-  alertThreshold: string;
-  notificationsEnabled: boolean;
-  wholesalePrice: string;
-  unitPrice: string;
-  supplier: string;
-  description: string;
-  location: string;
-};
-
-const emptyPartForm: PartFormState = {
-  partType: 'spare_part',
-  name: '',
-  partNumber: '',
-  category: '',
-  subcategory: '',
-  brand: '',
-  model: '',
-  quantity: '',
-  minQuantity: '',
-  alertThreshold: '',
-  notificationsEnabled: false,
-  wholesalePrice: '',
-  unitPrice: '',
-  supplier: '',
-  description: '',
-  location: '',
-};
+import { useAuth } from '../../hooks/useAuth';
+import { warningPanelSx } from '../../styles/ui';
+import DataExchangeDialog from '../../components/DataExchangeDialog/DataExchangeDialog';
+import {
+  INVENTORY_EXCHANGE_COLUMNS,
+  exportInventoryRows,
+  importInventoryRows,
+  inventoryTemplateSamples,
+} from '../../utils/inventoryExchange';
 
 const INVENTORY_GRID_PAGE_SIZE_KEY = 'inventory_grid_rows_per_page_v1';
+const INVENTORY_GRID_LAYOUT_KEY = 'inventory_grid_layout_v1';
+const INVENTORY_LOCATION_FILTER_KEY = 'inventory_location_filter_v1';
+const LEGACY_WAREHOUSE_FILTER_KEY = 'inventory_warehouse_filter_v1';
 const CUSTOM_SUPPLIERS_STORAGE_KEY = 'inventory_custom_suppliers_v1';
 const gridPageSizeOptions = [10, 50, 100];
+
+type InventoryColumnLayout = {
+  widths: Record<string, number>;
+};
+
+/** Относительные веса столбцов — в таблице пересчитываются в % от ширины контейнера */
+const normalizeInventoryColumnWidths = (widths: Record<string, number>) => {
+  const hasLegacyPixelWidths = Object.values(widths).some((value) => value > 50);
+  if (hasLegacyPixelWidths) {
+    return {};
+  }
+  const { location, warehouse, ...rest } = widths;
+  return rest;
+};
+
+const inventoryDefaultColumnWidths: Record<string, number> = {
+  name: 24,
+  category: 14,
+  model: 12,
+  quantity: 8,
+  wholesalePrice: 8,
+  unitPrice: 8,
+  supplier: 12,
+  actions: 18,
+};
 
 const getSavedGridPageSize = (key: string) => {
   const value = Number(localStorage.getItem(key));
@@ -99,6 +114,18 @@ const getSavedCustomSuppliers = () => {
   } catch {
     return [];
   }
+};
+
+const getSavedLocationFilter = () => {
+  const saved = localStorage.getItem(INVENTORY_LOCATION_FILTER_KEY);
+  if (saved && saved !== 'all') {
+    return saved;
+  }
+  const legacy = localStorage.getItem(LEGACY_WAREHOUSE_FILTER_KEY);
+  if (legacy && legacy !== 'all') {
+    return legacy;
+  }
+  return '';
 };
 
 const getPartDisplayModel = (part: Part) => {
@@ -117,17 +144,25 @@ const getPartDisplayModel = (part: Part) => {
 };
 
 const InventoryPage: React.FC = () => {
+  const navigate = useNavigate();
   const [isPartDialogOpen, setIsPartDialogOpen] = useState(false);
   const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
   const [isCategoryDialogOpen, setIsCategoryDialogOpen] = useState(false);
   const [isReceiptDialogOpen, setIsReceiptDialogOpen] = useState(false);
   const [isWriteoffDialogOpen, setIsWriteoffDialogOpen] = useState(false);
+  const [isSellDialogOpen, setIsSellDialogOpen] = useState(false);
   const [selectedPart, setSelectedPart] = useState<Part | null>(null);
   const [editingPartId, setEditingPartId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearchTerm = useDebouncedValue(searchTerm, 300);
   const [filterCategory, setFilterCategory] = useState('all');
+  const [filterLocation, setFilterLocation] = useState(() => getSavedLocationFilter());
+  const [newLocationName, setNewLocationName] = useState('');
+  const [isAddingLocation, setIsAddingLocation] = useState(false);
+  const ordersLoadedRef = useRef(false);
   const [filterStatus, setFilterStatus] = useState('all');
   const [partsData, setPartsData] = useState<Part[]>([]);
+  const [dataExchangeOpen, setDataExchangeOpen] = useState(false);
   const [movements, setMovements] = useState<StockMovement[]>([]);
   const [taxonomyNodes, setTaxonomyNodes] = useState<TaxonomyNode[]>([]);
   const [ordersData, setOrdersData] = useState<Order[]>([]);
@@ -135,21 +170,128 @@ const InventoryPage: React.FC = () => {
   const [newCategoryParentId, setNewCategoryParentId] = useState('');
   const [editingCategoryId, setEditingCategoryId] = useState('');
   const [editingCategoryName, setEditingCategoryName] = useState('');
-  const [partForm, setPartForm] = useState<PartFormState>(emptyPartForm);
-  const [receiptQuantity, setReceiptQuantity] = useState('');
-  const [receiptUnitCost, setReceiptUnitCost] = useState('');
-  const [receiptDocumentNumber, setReceiptDocumentNumber] = useState('');
-  const [receiptReason, setReceiptReason] = useState('Оприходование на склад');
-  const [writeoffQuantity, setWriteoffQuantity] = useState('1');
-  const [writeoffReason, setWriteoffReason] = useState('Ручное списание');
-  const [writeoffMode, setWriteoffMode] = useState<'manual' | 'order'>('manual');
-  const [writeoffOrderId, setWriteoffOrderId] = useState('');
-  const [isSellDialogOpen, setIsSellDialogOpen] = useState(false);
-  const [saleQuantity, setSaleQuantity] = useState('1');
-  const [salePrice, setSalePrice] = useState('');
-  const [salePaymentMethod, setSalePaymentMethod] = useState<'cash' | 'card' | 'transfer' | 'installment'>('cash');
+  const [partFormInitial, setPartFormInitial] = useState<PartFormState>(emptyPartForm);
+  const [writeoffInitialMode, setWriteoffInitialMode] = useState<'manual' | 'order'>('manual');
+  const [sellDefaultPrice, setSellDefaultPrice] = useState('');
   const [rowsPerPage, setRowsPerPage] = useState(() => getSavedGridPageSize(INVENTORY_GRID_PAGE_SIZE_KEY));
+  const [inventoryPage, setInventoryPage] = useState(0);
+  const [columnLayout, setColumnLayout] = useState<InventoryColumnLayout>(() => {
+    try {
+      const raw = localStorage.getItem(INVENTORY_GRID_LAYOUT_KEY);
+      if (!raw) {
+        return { widths: {} };
+      }
+      const parsed = JSON.parse(raw) as InventoryColumnLayout;
+      return { widths: normalizeInventoryColumnWidths(parsed.widths || {}) };
+    } catch {
+      return { widths: {} };
+    }
+  });
   const [customSuppliers, setCustomSuppliers] = useState<string[]>(getSavedCustomSuppliers);
+  const [crmSettings, setCrmSettings] = useState(() => appSettingsService.getSettings());
+  const { user } = useAuth();
+
+  useEffect(() => {
+    localStorage.setItem(INVENTORY_GRID_LAYOUT_KEY, JSON.stringify(columnLayout));
+  }, [columnLayout]);
+
+  const getColumnWidth = (field: string) =>
+    columnLayout.widths[field] || inventoryDefaultColumnWidths[field] || 12;
+
+  const updateColumnWidth = (field: string, width: number) => {
+    const safeWidth = Number.isFinite(width) ? Math.max(5, Math.min(40, width)) : 12;
+    setColumnLayout((prev) => ({
+      ...prev,
+      widths: {
+        ...prev.widths,
+        [field]: safeWidth,
+      },
+    }));
+  };
+
+  const handleColumnResizeStart = (
+    event: React.MouseEvent<HTMLDivElement>,
+    field: string,
+    fallbackWidth: number
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const startX = event.clientX;
+    const startWidth = getColumnWidth(field) || fallbackWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaWeight = (moveEvent.clientX - startX) / 10;
+      updateColumnWidth(field, startWidth + deltaWeight);
+    };
+
+    const handleMouseUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const renderResizableHeader = (field: string, label: string) => (
+    <Box
+      sx={{
+        position: 'relative',
+        display: 'flex',
+        alignItems: 'center',
+        width: '100%',
+        height: '100%',
+      }}
+    >
+      <Typography variant="body2" fontWeight={700} noWrap>
+        {label}
+      </Typography>
+      <Box
+        onMouseDown={(event) =>
+          handleColumnResizeStart(event, field, inventoryDefaultColumnWidths[field] || 120)
+        }
+        onClick={(event) => event.stopPropagation()}
+        sx={{
+          position: 'absolute',
+          top: 0,
+          right: -10,
+          bottom: 0,
+          width: 18,
+          cursor: 'col-resize',
+          zIndex: 4,
+          '&::after': {
+            content: '""',
+            position: 'absolute',
+            top: 12,
+            bottom: 12,
+            left: '50%',
+            borderLeft: '1px solid rgba(15, 23, 42, 0.24)',
+          },
+          '&:hover::after': {
+            borderLeftColor: 'rgba(234, 88, 12, 0.95)',
+          },
+        }}
+      />
+    </Box>
+  );
+
+  const formatPrice = (value: number) => `₽${Number(value || 0).toLocaleString('ru-RU')}`;
+
+  const getRetailPrice = (part: Part) => {
+    const retail = Number(part.unitPrice) || 0;
+    if (retail > 0) {
+      return retail;
+    }
+    return Number(part.wholesalePrice) || 0;
+  };
 
   const getErrorMessage = (error: unknown, fallback: string) => {
     if (axios.isAxiosError(error)) {
@@ -165,17 +307,132 @@ const InventoryPage: React.FC = () => {
   };
 
   const refreshInventory = async () => {
-    await taxonomyService.refreshFromApi();
-    await inventoryService.refreshFromApi();
+    await Promise.all([taxonomyService.refreshFromApi(), inventoryService.refreshFromApi()]);
     setPartsData(inventoryService.getParts());
     setMovements(inventoryService.getMovements());
     setTaxonomyNodes(taxonomyService.getNodes('inventory'));
-    setOrdersData(await orderService.getOrders());
+  };
+
+  const loadOrdersForWriteoff = async () => {
+    if (ordersLoadedRef.current) {
+      return;
+    }
+    ordersLoadedRef.current = true;
+    try {
+      setOrdersData(await orderService.getOrders());
+    } catch {
+      ordersLoadedRef.current = false;
+    }
   };
 
   useEffect(() => {
+    setPartsData(inventoryService.getParts());
+    setMovements(inventoryService.getMovements());
+    setTaxonomyNodes(taxonomyService.getNodes('inventory'));
     void refreshInventory();
   }, []);
+
+  useEffect(() => {
+    const loadSettings = async () => {
+      const nextSettings = await appSettingsService.refreshFromApi();
+      setCrmSettings(nextSettings);
+    };
+    void loadSettings();
+    const handleSettingsUpdated = () => setCrmSettings(appSettingsService.getSettings());
+    window.addEventListener('crm:settings-updated', handleSettingsUpdated as EventListener);
+    return () => window.removeEventListener('crm:settings-updated', handleSettingsUpdated as EventListener);
+  }, []);
+
+  const inventoryLocations = useMemo(() => {
+    const fromSettings = (crmSettings.locations?.items || [])
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    if (fromSettings.length > 0) {
+      return fromSettings;
+    }
+
+    const fromWarehouses = (crmSettings.orders.warehouses || [])
+      .map((warehouse) => (warehouse.name || '').trim())
+      .filter(Boolean);
+
+    if (fromWarehouses.length > 0) {
+      return Array.from(new Set(fromWarehouses));
+    }
+
+    const fromParts = Array.from(
+      new Set(
+        partsData
+          .map((part) => {
+            const raw = (part.warehouseId || '').trim();
+            if (!raw) {
+              return '';
+            }
+            const warehouse = (crmSettings.orders.warehouses || []).find((item) => item.id === raw);
+            return (warehouse?.name || raw).trim();
+          })
+          .filter(Boolean)
+      )
+    );
+
+    return fromParts;
+  }, [crmSettings.locations?.items, crmSettings.orders.warehouses, partsData]);
+
+  const defaultLocation = inventoryLocations[0] || '';
+  const activeLocationFilter = useMemo(() => {
+    if (inventoryLocations.length === 0) {
+      return '';
+    }
+    const candidate = (filterLocation || defaultLocation).trim();
+    return inventoryLocations.includes(candidate) ? candidate : inventoryLocations[0];
+  }, [defaultLocation, filterLocation, inventoryLocations]);
+
+  useEffect(() => {
+    setFilterLocation((current) => {
+      if (inventoryLocations.length === 0) {
+        return '';
+      }
+      const saved = getSavedLocationFilter();
+      const preferred = current && current !== 'all' ? current : saved;
+      const isValid = preferred && inventoryLocations.includes(preferred);
+      const next = isValid ? preferred : inventoryLocations[0];
+      if (next) {
+        localStorage.setItem(INVENTORY_LOCATION_FILTER_KEY, next);
+      }
+      return next;
+    });
+  }, [inventoryLocations]);
+
+  const resolvePartLocation = (part: Part) => {
+    const value = (part.warehouseId || '').trim();
+    if (!value) {
+      return '';
+    }
+    if (inventoryLocations.includes(value)) {
+      return value;
+    }
+    const legacyWarehouse = (crmSettings.orders.warehouses || []).find((warehouse) => warehouse.id === value);
+    if (legacyWarehouse?.name && inventoryLocations.includes(legacyWarehouse.name)) {
+      return legacyWarehouse.name;
+    }
+    return '';
+  };
+
+  const getEffectivePartLocation = (part: Part) => resolvePartLocation(part) || defaultLocation;
+
+  const getLocationLabel = (location?: string) => {
+    if (!location) {
+      return '—';
+    }
+    if (inventoryLocations.includes(location)) {
+      return location;
+    }
+    const legacyWarehouse = (crmSettings.orders.warehouses || []).find((warehouse) => warehouse.id === location);
+    if (legacyWarehouse) {
+      return legacyWarehouse.name;
+    }
+    return location;
+  };
 
   const rootCategories = useMemo(() => taxonomyNodes.filter((node) => !node.parentId), [taxonomyNodes]);
   const getSubcategories = (parentId: string) => taxonomyNodes.filter((node) => node.parentId === parentId);
@@ -185,27 +442,41 @@ const InventoryPage: React.FC = () => {
     ? taxonomyNodes.find((node) => node.id === selectedCategoryNode.parentId)
     : selectedCategoryNode;
 
-  const selectedPartRootCategory = rootCategories.find((node) => node.name === partForm.category);
-  const availableSubcategories = selectedPartRootCategory
-    ? getSubcategories(selectedPartRootCategory.id)
-    : [];
-
   const getAlertThreshold = (part: Part) =>
     typeof part.alertThreshold === 'number' ? part.alertThreshold : part.minQuantity;
 
   const isPartLowStock = (part: Part) => inventoryService.isLowStock(part);
 
-  const stats = useMemo(
-    () => ({
-      totalParts: partsData.length,
-      lowStockParts: partsData.filter((part) => isPartLowStock(part)).length,
-      totalValue: partsData.reduce((sum, part) => sum + part.quantity * (part.wholesalePrice ?? part.unitPrice), 0),
-      outOfStockParts: partsData.filter((part) => part.quantity === 0).length,
-    }),
-    [partsData]
+  const locationParts = useMemo(
+    () =>
+      activeLocationFilter
+        ? partsData.filter((part) => getEffectivePartLocation(part) === activeLocationFilter)
+        : [],
+    [partsData, activeLocationFilter, defaultLocation, inventoryLocations]
   );
 
-  const lowStockParts = useMemo(() => partsData.filter((part) => isPartLowStock(part)), [partsData]);
+  const unassignedPartsCount = useMemo(
+    () => locationParts.filter((part) => !resolvePartLocation(part)).length,
+    [locationParts, inventoryLocations]
+  );
+
+  const stats = useMemo(
+    () => ({
+      totalParts: locationParts.length,
+      lowStockParts: locationParts.filter((part) => isPartLowStock(part)).length,
+      totalValue: locationParts.reduce(
+        (sum, part) => sum + part.quantity * (part.wholesalePrice ?? part.unitPrice),
+        0
+      ),
+      outOfStockParts: locationParts.filter((part) => part.quantity === 0).length,
+    }),
+    [locationParts]
+  );
+
+  const lowStockParts = useMemo(
+    () => locationParts.filter((part) => isPartLowStock(part)),
+    [locationParts]
+  );
   const activeOrders = useMemo(
     () => ordersData.filter((order) => !['completed', 'cancelled'].includes(order.status)),
     [ordersData]
@@ -225,10 +496,10 @@ const InventoryPage: React.FC = () => {
     () =>
       partsData.filter((part) => {
         const matchesSearch =
-          part.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          part.partNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          part.brand.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          part.model.toLowerCase().includes(searchTerm.toLowerCase());
+          part.name.toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
+          part.partNumber.toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
+          part.brand.toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
+          part.model.toLowerCase().includes(debouncedSearchTerm.toLowerCase());
 
         const matchesCategory =
           filterCategory === 'all' ||
@@ -245,24 +516,29 @@ const InventoryPage: React.FC = () => {
           matchesStatus = !isPartLowStock(part) && part.quantity > 0;
         }
 
-        return matchesSearch && matchesCategory && matchesStatus;
+        const matchesLocation =
+          Boolean(activeLocationFilter) && getEffectivePartLocation(part) === activeLocationFilter;
+
+        return matchesSearch && matchesCategory && matchesStatus && matchesLocation;
       }),
-    [partsData, searchTerm, filterCategory, filterStatus, selectedCategoryNode, selectedRootNode]
+    [partsData, debouncedSearchTerm, filterCategory, activeLocationFilter, filterStatus, selectedCategoryNode, selectedRootNode, defaultLocation, inventoryLocations]
   );
+
+  const inventoryExchangeExportRows = useMemo(() => exportInventoryRows(filteredParts), [filteredParts]);
 
   const categoryStats = useMemo(
     () =>
       rootCategories.map((category) => ({
         category,
-        count: partsData.filter((part) => part.category === category.name).length,
+        count: locationParts.filter((part) => part.category === category.name).length,
         children: getSubcategories(category.id),
       })),
-    [partsData, rootCategories, taxonomyNodes]
+    [locationParts, rootCategories, taxonomyNodes]
   );
 
   const resetPartForm = () => {
     setEditingPartId(null);
-    setPartForm(emptyPartForm);
+    setPartFormInitial(emptyPartForm);
   };
 
   const rememberSupplier = (supplier: string) => {
@@ -285,10 +561,12 @@ const InventoryPage: React.FC = () => {
 
   const openCreatePartDialog = () => {
     setEditingPartId(null);
-    setPartForm({
+    const defaultPartLocation = activeLocationFilter || inventoryLocations[0] || '';
+    setPartFormInitial({
       ...emptyPartForm,
       category: selectedCategoryNode?.parentId ? selectedRootNode?.name || '' : selectedCategoryNode?.name || '',
       subcategory: selectedCategoryNode?.parentId ? selectedCategoryNode.name : '',
+      warehouseId: defaultPartLocation,
     });
     setIsPartDialogOpen(true);
   };
@@ -300,25 +578,18 @@ const InventoryPage: React.FC = () => {
 
   const openReceiptDialog = (part: Part) => {
     setSelectedPart(part);
-    setReceiptQuantity('');
-    setReceiptUnitCost(String((part.wholesalePrice ?? part.unitPrice) || ''));
-    setReceiptDocumentNumber('');
-    setReceiptReason('Оприходование на склад');
     setIsReceiptDialogOpen(true);
   };
 
   const openWriteoffDialog = (part: Part, mode: 'manual' | 'order' = 'manual') => {
     setSelectedPart(part);
-    setWriteoffMode(mode);
-    setWriteoffQuantity('1');
-    setWriteoffReason(mode === 'order' ? 'Списание в заказ' : 'Ручное списание');
-    setWriteoffOrderId('');
+    setWriteoffInitialMode(mode);
     setIsWriteoffDialogOpen(true);
   };
 
   const openEditPartDialog = (part: Part) => {
     setEditingPartId(part.id);
-    setPartForm({
+    setPartFormInitial({
       partType: 'spare_part',
       name: part.name,
       partNumber: part.partNumber,
@@ -329,18 +600,18 @@ const InventoryPage: React.FC = () => {
       quantity: String(part.quantity),
       minQuantity: String(getAlertThreshold(part)),
       alertThreshold: String(getAlertThreshold(part)),
-      notificationsEnabled: part.notificationsEnabled ?? true,
-      wholesalePrice: String(part.wholesalePrice ?? part.unitPrice),
-      unitPrice: String(part.unitPrice),
+      notificationsEnabled: part.notificationsEnabled === true,
+      wholesalePrice: String(part.wholesalePrice ?? 0),
+      unitPrice: String(part.unitPrice || ''),
       supplier: part.supplier,
       description: part.description || '',
-      location: part.location,
+      warehouseId: part.warehouseId || '',
     });
     setIsViewDialogOpen(false);
     setIsPartDialogOpen(true);
   };
 
-  const handleSavePart = async () => {
+  const handleSavePart = async (partForm: PartFormState) => {
     if (!partForm.name.trim() || !partForm.category) {
       toast.error('Заполните обязательные поля');
       return;
@@ -361,12 +632,13 @@ const InventoryPage: React.FC = () => {
       quantity: Number(partForm.quantity) || 0,
       minQuantity: alertThreshold,
       alertThreshold,
-      notificationsEnabled: partForm.notificationsEnabled,
-      wholesalePrice: Number(partForm.wholesalePrice) || Number(partForm.unitPrice) || 0,
-      unitPrice: Number(partForm.wholesalePrice) || Number(partForm.unitPrice) || 0,
+      notificationsEnabled: Boolean(partForm.notificationsEnabled),
+      wholesalePrice: Number(partForm.wholesalePrice) || 0,
+      unitPrice: Number(partForm.unitPrice) || Number(partForm.wholesalePrice) || 0,
       supplier,
       supplierContact: '',
-      location: partForm.location.trim(),
+      location: partForm.warehouseId || activeLocationFilter || defaultLocation || '',
+      warehouseId: partForm.warehouseId || undefined,
     };
 
     try {
@@ -386,7 +658,12 @@ const InventoryPage: React.FC = () => {
     }
   };
 
-  const handleReceiveStock = async () => {
+  const handleReceiveStock = async ({
+    quantity: receiptQuantity,
+    unitCost: receiptUnitCost,
+    documentNumber: receiptDocumentNumber,
+    reason: receiptReason,
+  }: ReceiptFormValues) => {
     if (!selectedPart) {
       return;
     }
@@ -417,7 +694,12 @@ const InventoryPage: React.FC = () => {
     toast.success('Поступление по складу сохранено');
   };
 
-  const handleWriteoffStock = async () => {
+  const handleWriteoffStock = async ({
+    mode: writeoffMode,
+    quantity: writeoffQuantity,
+    reason: writeoffReason,
+    orderId: writeoffOrderId,
+  }: WriteoffFormValues) => {
     if (!selectedPart) {
       return;
     }
@@ -494,13 +776,15 @@ const InventoryPage: React.FC = () => {
 
   const openSellDialog = (part: Part) => {
     setSelectedPart(part);
-    setSaleQuantity('1');
-    setSalePrice(String(part.unitPrice || 0));
-    setSalePaymentMethod('cash');
+    setSellDefaultPrice(String(getRetailPrice(part)));
     setIsSellDialogOpen(true);
   };
 
-  const handleSellItem = async () => {
+  const handleSellItem = async ({
+    quantity: saleQuantity,
+    price: salePrice,
+    paymentMethod: salePaymentMethod,
+  }: SellFormValues) => {
     if (!selectedPart) return;
 
     const quantity = Number(saleQuantity);
@@ -644,48 +928,69 @@ const InventoryPage: React.FC = () => {
     }
   };
 
-  const columns: GridColDef[] = [
-    {
-      field: 'name',
-      headerName: 'Название',
-      width: 220,
-      renderCell: (params) => (
-        <Box sx={{ cursor: 'pointer' }}>
-          <Typography variant="body2" fontWeight={700}>
-            {params.value}
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            {params.row.partNumber}
-          </Typography>
-        </Box>
-      ),
-    },
-    {
-      field: 'category',
-      headerName: 'Категория',
-      width: 200,
-      renderCell: (params) => (
-        <Chip
-          label={params.row.subcategory ? `${params.value} / ${params.row.subcategory}` : params.value}
-          color="primary"
-          size="small"
-        />
-      ),
-    },
-    {
-      field: 'model',
-      headerName: 'Модель',
-      width: 220,
-      valueGetter: (params) => getPartDisplayModel(params.row),
-    },
-    {
-      field: 'quantity',
-      headerName: 'Количество',
-      width: 130,
-      renderCell: (params) => {
-        const isLowStock = isPartLowStock(params.row);
-        const isOutOfStock = params.value === 0;
+  const columns = useMemo(
+    () => [
+      { field: 'name', headerName: 'Название', width: getColumnWidth('name') },
+      { field: 'category', headerName: 'Категория', width: getColumnWidth('category') },
+      { field: 'model', headerName: 'Модель', width: getColumnWidth('model') },
+      { field: 'quantity', headerName: 'Количество', width: getColumnWidth('quantity') },
+      { field: 'wholesalePrice', headerName: 'Оптовая', width: getColumnWidth('wholesalePrice') },
+      { field: 'unitPrice', headerName: 'Розничная', width: getColumnWidth('unitPrice') },
+      { field: 'supplier', headerName: 'Поставщик', width: getColumnWidth('supplier') },
+      { field: 'actions', headerName: 'Действия', width: getColumnWidth('actions') },
+    ],
+    [columnLayout.widths]
+  );
 
+  const totalInventoryPages = Math.max(1, Math.ceil(filteredParts.length / rowsPerPage));
+  const safeInventoryPage = Math.min(inventoryPage, totalInventoryPages - 1);
+  const paginatedParts = filteredParts.slice(
+    safeInventoryPage * rowsPerPage,
+    safeInventoryPage * rowsPerPage + rowsPerPage
+  );
+  const columnsTotalWeight = columns.reduce((total, column) => total + Number(column.width || 12), 0);
+
+  const getColumnPercent = (width: number) =>
+    `${((Number(width || 12) / columnsTotalWeight) * 100).toFixed(4)}%`;
+
+  const renderPartCell = (field: string, part: Part) => {
+    switch (field) {
+      case 'name':
+        return (
+          <Box>
+            <Typography variant="body2" fontWeight={700} noWrap>
+              {part.name}
+            </Typography>
+            <Typography variant="caption" color="text.secondary" noWrap>
+              {part.partNumber}
+            </Typography>
+          </Box>
+        );
+      case 'category':
+        return (
+          <Chip
+            label={part.subcategory ? `${part.category} / ${part.subcategory}` : part.category}
+            color="primary"
+            size="small"
+            sx={{
+              maxWidth: '100%',
+              '& .MuiChip-label': {
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              },
+            }}
+          />
+        );
+      case 'model':
+        return (
+          <Typography variant="body2" noWrap>
+            {getPartDisplayModel(part) || '—'}
+          </Typography>
+        );
+      case 'quantity': {
+        const isLowStock = isPartLowStock(part);
+        const isOutOfStock = part.quantity === 0;
         return (
           <Box display="flex" alignItems="center">
             <Typography
@@ -693,67 +998,208 @@ const InventoryPage: React.FC = () => {
               color={isOutOfStock ? 'error.main' : isLowStock ? 'warning.main' : 'success.main'}
               fontWeight={700}
             >
-              {params.value}
+              {part.quantity}
             </Typography>
             {isLowStock && <Warning sx={{ ml: 1, color: 'warning.main', fontSize: 16 }} />}
           </Box>
         );
-      },
-    },
-    {
-      field: 'unitPrice',
-      headerName: 'Цена',
-      width: 130,
-      renderCell: (params) => (
-        <Typography variant="body2" fontWeight={700}>
-          ₽{Number((params.row.wholesalePrice ?? params.value) || 0).toLocaleString('ru-RU')}
-        </Typography>
-      ),
-    },
-    { field: 'supplier', headerName: 'Поставщик', width: 160 },
-    { field: 'location', headerName: 'Местоположение', width: 160 },
-    {
-      field: 'actions',
-      headerName: 'Действия',
-      width: 150,
-      sortable: false,
-      renderCell: (params: any) => (
-        <Box>
-          <IconButton size="small" onClick={() => openViewDialog(params.row)}>
-            <Visibility />
-          </IconButton>
-          <IconButton size="small" onClick={() => openWriteoffDialog(params.row, 'manual')} title="Списать">
-            <LocalShipping />
-          </IconButton>
-          <IconButton size="small" onClick={() => openReceiptDialog(params.row)} title="Оприходовать">
-            <Add />
-          </IconButton>
-          <IconButton size="small" onClick={() => openSellDialog(params.row)} title="Продать">
-            <ReceiptLong />
-          </IconButton>
-          <IconButton size="small" onClick={() => openEditPartDialog(params.row)}>
-            <Edit />
-          </IconButton>
-          <IconButton
-            size="small"
-            onClick={async () => {
-              await inventoryService.deletePart(params.row.id);
-              await refreshInventory();
-              toast.success('Запчасть удалена');
-            }}
+      }
+      case 'wholesalePrice':
+        return (
+          <Typography variant="body2" fontWeight={700} color="text.secondary" noWrap>
+            {formatPrice(Number(part.wholesalePrice) || 0)}
+          </Typography>
+        );
+      case 'unitPrice':
+        return (
+          <Typography variant="body2" fontWeight={700} noWrap>
+            {formatPrice(getRetailPrice(part))}
+          </Typography>
+        );
+      case 'supplier':
+        return (
+          <Typography variant="body2" noWrap>
+            {part.supplier || '—'}
+          </Typography>
+        );
+      case 'actions':
+        return (
+          <Box
+            onClick={(event) => event.stopPropagation()}
+            sx={{ display: 'flex', alignItems: 'center', flexWrap: 'nowrap', mx: -0.75 }}
           >
-            <Delete />
-          </IconButton>
-        </Box>
-      ),
-    },
-  ];
+            <IconButton size="small" sx={{ p: 0.4 }} onClick={() => openViewDialog(part)} title="Просмотр">
+              <Visibility sx={{ fontSize: 18 }} />
+            </IconButton>
+            <IconButton size="small" sx={{ p: 0.4 }} onClick={() => openWriteoffDialog(part, 'manual')} title="Списать">
+              <LocalShipping sx={{ fontSize: 18 }} />
+            </IconButton>
+            <IconButton size="small" sx={{ p: 0.4 }} onClick={() => openReceiptDialog(part)} title="Оприходовать">
+              <Add sx={{ fontSize: 18 }} />
+            </IconButton>
+            <IconButton size="small" sx={{ p: 0.4 }} onClick={() => openSellDialog(part)} title="Продать">
+              <ReceiptLong sx={{ fontSize: 18 }} />
+            </IconButton>
+            <IconButton size="small" sx={{ p: 0.4 }} onClick={() => openEditPartDialog(part)} title="Изменить">
+              <Edit sx={{ fontSize: 18 }} />
+            </IconButton>
+            <IconButton
+              size="small"
+              sx={{ p: 0.4 }}
+              title="Удалить"
+              onClick={async () => {
+                await inventoryService.deletePart(part.id);
+                await refreshInventory();
+                toast.success('Запчасть удалена');
+              }}
+            >
+              <Delete sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Box>
+        );
+      default:
+        return null;
+    }
+  };
+
+  const handleAddLocationFromInventory = async (preset?: string) => {
+    const value = (preset ?? newLocationName).trim();
+    if (!value) {
+      toast.error('Введите название локации');
+      return;
+    }
+    if (inventoryLocations.includes(value)) {
+      toast.error('Такая локация уже есть');
+      return;
+    }
+
+    setIsAddingLocation(true);
+    try {
+      const nextSettings = {
+        ...crmSettings,
+        locations: {
+          items: [...(crmSettings.locations?.items || []), value],
+        },
+      };
+      const saved = await appSettingsService.saveSettings(nextSettings);
+      setCrmSettings(saved);
+      setFilterLocation(value);
+      localStorage.setItem(INVENTORY_LOCATION_FILTER_KEY, value);
+      setNewLocationName('');
+      toast.success(`Локация «${value}» добавлена`);
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Не удалось сохранить локацию'));
+    } finally {
+      setIsAddingLocation(false);
+    }
+  };
 
   return (
     <Box sx={{ p: 3 }}>
-      <Typography variant="h4" fontWeight={700} gutterBottom>
-        Склад
-      </Typography>
+      <Stack spacing={2} sx={{ mb: 3 }}>
+        <Stack
+          direction={{ xs: 'column', sm: 'row' }}
+          spacing={2}
+          alignItems={{ xs: 'flex-start', sm: 'center' }}
+          justifyContent="space-between"
+        >
+          <Typography variant="h4" fontWeight={700}>
+            Склад
+          </Typography>
+        </Stack>
+        {inventoryLocations.length === 0 ? (
+          <Card variant="outlined" sx={{ maxWidth: 560, p: 2 }}>
+            <Typography variant="subtitle1" fontWeight={700} gutterBottom>
+              Локация склада не настроена
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Добавьте первую точку — без неё нельзя выбрать склад и привязать запчасти.
+            </Typography>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', sm: 'flex-start' }}>
+              <TextField
+                size="small"
+                fullWidth
+                placeholder="Например: Основной склад"
+                value={newLocationName}
+                onChange={(event) => setNewLocationName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void handleAddLocationFromInventory();
+                  }
+                }}
+                disabled={isAddingLocation}
+              />
+              <Button
+                variant="contained"
+                onClick={() => void handleAddLocationFromInventory()}
+                disabled={isAddingLocation}
+                sx={{ flexShrink: 0 }}
+              >
+                {isAddingLocation ? 'Сохранение...' : 'Добавить'}
+              </Button>
+            </Stack>
+            <Stack direction="row" spacing={1} sx={{ mt: 1.5 }} flexWrap="wrap" useFlexGap>
+              <Button
+                size="small"
+                variant="text"
+                disabled={isAddingLocation}
+                onClick={() => void handleAddLocationFromInventory('Основной склад')}
+              >
+                Основной склад
+              </Button>
+              <Button
+                size="small"
+                variant="text"
+                onClick={() => navigate('/settings?section=locations')}
+                disabled={isAddingLocation}
+              >
+                Все локации в настройках
+              </Button>
+            </Stack>
+          </Card>
+        ) : (
+          <FormControl size="small" sx={{ width: { xs: '100%', sm: 320 } }}>
+            <InputLabel id="inventory-location-filter-label">Локация</InputLabel>
+            <Select
+              labelId="inventory-location-filter-label"
+              id="inventory-location-filter"
+              label="Локация"
+              value={activeLocationFilter}
+              onChange={(e) => {
+                const value = e.target.value;
+                setFilterLocation(value);
+                localStorage.setItem(INVENTORY_LOCATION_FILTER_KEY, value);
+                setInventoryPage(0);
+              }}
+              MenuProps={{
+                disablePortal: false,
+                PaperProps: { sx: { maxHeight: 320 } },
+              }}
+            >
+              {inventoryLocations.map((location) => (
+                <MenuItem key={location} value={location}>
+                  {location}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        )}
+      </Stack>
+
+      {inventoryLocations.length === 0 && (
+        <Alert severity="info" sx={{ mb: 3 }}>
+          После добавления локации вы сможете выбирать склад в списке и фильтровать запчасти по точке.
+        </Alert>
+      )}
+
+      {unassignedPartsCount > 0 && activeLocationFilter === defaultLocation && (
+        <Alert severity="info" sx={{ mb: 3 }}>
+          {unassignedPartsCount}{' '}
+          {unassignedPartsCount === 1 ? 'позиция показана' : 'позиций показано'} без привязки к локации — отображаются в «
+          {defaultLocation}». Укажите локацию при редактировании запчасти.
+        </Alert>
+      )}
 
       <Grid container spacing={3} sx={{ mb: 4 }}>
         <Grid item xs={12} sm={6} md={3}>
@@ -847,14 +1293,7 @@ const InventoryPage: React.FC = () => {
       <Grid container spacing={3}>
         {lowStockParts.length > 0 && (
           <Grid item xs={12}>
-            <Card
-              sx={{
-                bgcolor: '#fff7ed',
-                color: '#7c2d12',
-                border: '1px solid #fdba74',
-                boxShadow: 'none',
-              }}
-            >
+            <Card sx={warningPanelSx}>
               <CardContent>
                 <Typography variant="h6" fontWeight={700} gutterBottom>
                   ⚠️ Внимание! Низкий остаток запчастей
@@ -863,27 +1302,29 @@ const InventoryPage: React.FC = () => {
                   {lowStockParts.map((part) => (
                     <Grid item key={part.id}>
                       <Box
-                        sx={{
+                        sx={(theme) => ({
                           display: 'inline-flex',
                           alignItems: 'center',
                           gap: 0.5,
-                          bgcolor: '#ffffff',
+                          bgcolor: theme.palette.mode === 'dark' ? 'background.paper' : '#ffffff',
                           border: '1px solid',
-                          borderColor: '#fb923c',
+                          borderColor: theme.palette.mode === 'dark' ? 'warning.main' : '#fb923c',
                           borderRadius: 2,
                           overflow: 'hidden',
-                        }}
+                        })}
                       >
                         <Button
                           size="small"
                           onClick={() => openReceiptDialog(part)}
-                          sx={{
-                            color: '#9a3412',
+                          sx={(theme) => ({
+                            color: theme.palette.mode === 'dark' ? 'warning.light' : '#9a3412',
                             fontWeight: 700,
                             px: 1.5,
                             textTransform: 'none',
-                            '&:hover': { bgcolor: '#ffedd5' },
-                          }}
+                            '&:hover': {
+                              bgcolor: theme.palette.mode === 'dark' ? 'action.hover' : '#ffedd5',
+                            },
+                          })}
                         >
                           {`${part.name} (${part.quantity}/${getAlertThreshold(part)})`}
                         </Button>
@@ -910,7 +1351,7 @@ const InventoryPage: React.FC = () => {
         )}
 
         <Grid item xs={12} lg={3}>
-          <Card sx={{ height: '100%' }}>
+          <Card>
             <CardContent>
               <Typography variant="h6" fontWeight={700} gutterBottom>
                 Категории склада
@@ -927,8 +1368,9 @@ const InventoryPage: React.FC = () => {
               >
                 Управлять категориями
               </Button>
-              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+              <Stack spacing={1.25}>
                 <Button
+                  fullWidth
                   variant={filterCategory === 'all' ? 'contained' : 'outlined'}
                   onClick={() => setFilterCategory('all')}
                   sx={{ justifyContent: 'space-between', px: 2 }}
@@ -936,7 +1378,12 @@ const InventoryPage: React.FC = () => {
                   <span>Все категории</span>
                   <strong>{partsData.length}</strong>
                 </Button>
-                {categoryStats.map((item) => (
+                {categoryStats.length === 0 ? (
+                  <Alert severity="info" sx={{ mt: 0.5 }}>
+                    Категорий пока нет. Создайте их через «Управлять категориями» или в начальной настройке.
+                  </Alert>
+                ) : (
+                  categoryStats.map((item) => (
                   <Box key={item.category.id}>
                     <Button
                       fullWidth
@@ -948,10 +1395,11 @@ const InventoryPage: React.FC = () => {
                       <strong>{item.count}</strong>
                     </Button>
                     {item.children.length > 0 && (
-                      <Box sx={{ mt: 1, ml: 2, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <Stack spacing={1} sx={{ ml: 2, mt: 1 }}>
                         {item.children.map((child) => (
                           <Button
                             key={child.id}
+                            fullWidth
                             size="small"
                             variant={filterCategory === child.id ? 'contained' : 'text'}
                             onClick={() => setFilterCategory(child.id)}
@@ -967,11 +1415,12 @@ const InventoryPage: React.FC = () => {
                             </strong>
                           </Button>
                         ))}
-                      </Box>
+                      </Stack>
                     )}
                   </Box>
-                ))}
-              </Box>
+                  ))
+                )}
+              </Stack>
             </CardContent>
           </Card>
         </Grid>
@@ -1041,44 +1490,186 @@ const InventoryPage: React.FC = () => {
                       setSearchTerm('');
                       setFilterCategory('all');
                       setFilterStatus('all');
+                      setInventoryPage(0);
                     }}
                   >
                     Сбросить
                   </Button>
                 </Grid>
+                <Grid item xs={12} md={2}>
+                  <Button
+                    fullWidth
+                    variant="outlined"
+                    size="small"
+                    startIcon={<ImportExport />}
+                    onClick={() => setDataExchangeOpen(true)}
+                    sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 600 }}
+                  >
+                    Импорт / экспорт
+                  </Button>
+                </Grid>
                 <Grid item xs={12} md={3}>
-                  <Button fullWidth variant="contained" startIcon={<Add />} onClick={openCreatePartDialog}>
+                  <Button
+                    fullWidth
+                    variant="contained"
+                    size="small"
+                    startIcon={<Add />}
+                    onClick={openCreatePartDialog}
+                    sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 600 }}
+                  >
                     Добавить запчасть
                   </Button>
                 </Grid>
               </Grid>
 
-              <Box sx={{ height: 600, width: '100%' }}>
-                <DataGrid
-                  rows={filteredParts}
-                  columns={columns}
-                  pageSize={rowsPerPage}
-                  rowsPerPageOptions={gridPageSizeOptions}
-                  onPageSizeChange={(value) => {
-                    setRowsPerPage(value);
-                    localStorage.setItem(INVENTORY_GRID_PAGE_SIZE_KEY, String(value));
-                  }}
-                  disableSelectionOnClick
-                  onRowClick={(params) => openViewDialog(params.row as Part)}
+              <Box sx={{ width: '100%', overflow: 'hidden', border: '1px solid rgba(15, 23, 42, 0.08)', borderRadius: 2 }}>
+                <Box
+                  component="table"
                   sx={{
-                    '& .MuiDataGrid-cell': {
-                      borderBottom: '1px solid #f0f0f0',
-                      cursor: 'pointer',
-                    },
-                    '& .MuiDataGrid-columnHeaders': {
-                      backgroundColor: '#f8f9fa',
-                      borderBottom: '2px solid #e0e0e0',
-                    },
-                    '& .MuiDataGrid-columnSeparator': {
-                      display: 'none',
-                    },
+                    width: '100%',
+                    borderCollapse: 'collapse',
+                    tableLayout: 'fixed',
                   }}
-                />
+                >
+                  <colgroup>
+                    {columns.map((column) => (
+                      <col key={column.field} style={{ width: getColumnPercent(column.width) }} />
+                    ))}
+                  </colgroup>
+                  <Box component="thead" sx={{ bgcolor: 'var(--crm-panel)' }}>
+                    <Box component="tr">
+                      {columns.map((column) => (
+                        <Box
+                          component="th"
+                          key={column.field}
+                          sx={{
+                            position: 'relative',
+                            height: 48,
+                            px: 1,
+                            textAlign: 'left',
+                            borderBottom: '1px solid var(--crm-border)',
+                            color: 'text.secondary',
+                            fontSize: '0.8125rem',
+                            fontWeight: 700,
+                            overflow: 'hidden',
+                          }}
+                        >
+                          {renderResizableHeader(column.field, column.headerName)}
+                        </Box>
+                      ))}
+                    </Box>
+                  </Box>
+                  <Box component="tbody">
+                    {paginatedParts.map((part) => (
+                      <Box
+                        component="tr"
+                        key={part.id}
+                        onClick={() => openViewDialog(part)}
+                        sx={{
+                          cursor: 'pointer',
+                          '&:hover': {
+                            bgcolor: 'rgba(15, 23, 42, 0.025)',
+                          },
+                        }}
+                      >
+                        {columns.map((column) => (
+                          <Box
+                            component="td"
+                            key={`${part.id}-${column.field}`}
+                            sx={{
+                              height: 48,
+                              px: 1,
+                              py: 0.5,
+                              borderBottom: '1px solid rgba(15, 23, 42, 0.06)',
+                              verticalAlign: 'middle',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                          >
+                            {renderPartCell(column.field, part)}
+                          </Box>
+                        ))}
+                      </Box>
+                    ))}
+                    {paginatedParts.length === 0 && (
+                      <Box component="tr">
+                        <Box
+                          component="td"
+                          colSpan={columns.length}
+                          sx={{
+                            py: 4,
+                            textAlign: 'center',
+                            color: 'text.secondary',
+                            borderBottom: '1px solid rgba(15, 23, 42, 0.06)',
+                          }}
+                        >
+                          {activeLocationFilter
+                            ? `Нет позиций в локации «${getLocationLabel(activeLocationFilter)}»`
+                            : 'Выберите локацию'}
+                        </Box>
+                      </Box>
+                    )}
+                  </Box>
+                </Box>
+                <Box
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'flex-end',
+                    gap: 2,
+                    minHeight: 52,
+                    px: 2,
+                    borderTop: '1px solid rgba(15, 23, 42, 0.08)',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <Typography variant="body2" color="text.secondary">
+                    Позиций на странице
+                  </Typography>
+                  <Select
+                    size="small"
+                    value={rowsPerPage}
+                    onChange={(event) => {
+                      const nextRowsPerPage = Number(event.target.value);
+                      setRowsPerPage(nextRowsPerPage);
+                      localStorage.setItem(INVENTORY_GRID_PAGE_SIZE_KEY, String(nextRowsPerPage));
+                      setInventoryPage(0);
+                    }}
+                    sx={{ minWidth: 88 }}
+                  >
+                    {gridPageSizeOptions.map((option) => (
+                      <MenuItem key={option} value={option}>
+                        {option}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                  <Typography variant="body2">
+                    {filteredParts.length === 0
+                      ? '0-0 из 0'
+                      : `${safeInventoryPage * rowsPerPage + 1}-${Math.min(
+                          (safeInventoryPage + 1) * rowsPerPage,
+                          filteredParts.length
+                        )} из ${filteredParts.length}`}
+                  </Typography>
+                  <Button
+                    size="small"
+                    variant="text"
+                    disabled={safeInventoryPage === 0}
+                    onClick={() => setInventoryPage((page) => Math.max(0, page - 1))}
+                    sx={{ minWidth: 36 }}
+                  >
+                    {'<'}
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="text"
+                    disabled={safeInventoryPage >= totalInventoryPages - 1}
+                    onClick={() => setInventoryPage((page) => Math.min(totalInventoryPages - 1, page + 1))}
+                    sx={{ minWidth: 36 }}
+                  >
+                    {'>'}
+                  </Button>
+                </Box>
               </Box>
             </CardContent>
           </Card>
@@ -1143,102 +1734,19 @@ const InventoryPage: React.FC = () => {
           </Card>
         </Grid>
       </Grid>
-      <Dialog open={isPartDialogOpen} onClose={() => setIsPartDialogOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>{editingPartId ? 'Редактировать запчасть' : 'Добавить запчасть'}</DialogTitle>
-        <DialogContent>
-          <Grid container spacing={2} sx={{ mt: 1 }}>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Название *" value={partForm.name} onChange={(e) => setPartForm((prev) => ({ ...prev, name: e.target.value }))} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Артикул" value={partForm.partNumber} onChange={(e) => setPartForm((prev) => ({ ...prev, partNumber: e.target.value }))} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <FormControl fullWidth>
-                <InputLabel>Категория *</InputLabel>
-                <Select
-                  value={partForm.category}
-                  label="Категория *"
-                  onChange={(e) =>
-                    setPartForm((prev) => ({
-                      ...prev,
-                      category: e.target.value,
-                      subcategory: '',
-                    }))
-                  }
-                >
-                  {rootCategories.map((category) => (
-                    <MenuItem key={category.id} value={category.name}>
-                      {category.name}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <FormControl fullWidth disabled={!partForm.category || availableSubcategories.length === 0}>
-                <InputLabel>Подкатегория</InputLabel>
-                <Select
-                  value={partForm.subcategory}
-                  label="Подкатегория"
-                  onChange={(e) => setPartForm((prev) => ({ ...prev, subcategory: e.target.value }))}
-                >
-                  <MenuItem value="">Без подкатегории</MenuItem>
-                  {availableSubcategories.map((subcategory) => (
-                    <MenuItem key={subcategory.id} value={subcategory.name}>
-                      {subcategory.name}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Модель" value={partForm.model} onChange={(e) => setPartForm((prev) => ({ ...prev, model: e.target.value }))} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Количество" type="number" value={partForm.quantity} onChange={(e) => setPartForm((prev) => ({ ...prev, quantity: e.target.value }))} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField fullWidth label="Порог уведомления" type="number" value={partForm.alertThreshold} onChange={(e) => setPartForm((prev) => ({ ...prev, alertThreshold: e.target.value }))} />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <TextField
-                fullWidth
-                label="Оптовая цена, ₽"
-                type="number"
-                value={partForm.wholesalePrice}
-                onChange={(e) => setPartForm((prev) => ({ ...prev, wholesalePrice: e.target.value }))}
-              />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <Autocomplete
-                freeSolo
-                options={supplierOptions}
-                value={partForm.supplier}
-                onChange={(_, value) => setPartForm((prev) => ({ ...prev, supplier: value || '' }))}
-                onInputChange={(_, value) => setPartForm((prev) => ({ ...prev, supplier: value }))}
-                renderInput={(params) => <TextField {...params} fullWidth label="Поставщик" />}
-              />
-            </Grid>
-            <Grid item xs={12}>
-              <TextField fullWidth label="Локация" value={partForm.location} onChange={(e) => setPartForm((prev) => ({ ...prev, location: e.target.value }))} />
-            </Grid>
-            <Grid item xs={12}>
-              <TextField fullWidth label="Описание" multiline minRows={2} value={partForm.description} onChange={(e) => setPartForm((prev) => ({ ...prev, description: e.target.value }))} />
-            </Grid>
-            <Grid item xs={12}>
-              <FormControlLabel
-                control={<Switch checked={partForm.notificationsEnabled} onChange={(e) => setPartForm((prev) => ({ ...prev, notificationsEnabled: e.target.checked }))} />}
-                label="Участвует в уведомлениях о низком остатке"
-              />
-            </Grid>
-          </Grid>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsPartDialogOpen(false)}>Отмена</Button>
-          <Button variant="contained" onClick={handleSavePart}>{editingPartId ? 'Сохранить' : 'Добавить'}</Button>
-        </DialogActions>
-      </Dialog>
+      <InventoryPartFormDialog
+        open={isPartDialogOpen}
+        editingPartId={editingPartId}
+        initialValues={partFormInitial}
+        inventoryLocations={inventoryLocations}
+        activeLocationFilter={activeLocationFilter}
+        defaultLocation={defaultLocation}
+        rootCategories={rootCategories}
+        taxonomyNodes={taxonomyNodes}
+        supplierOptions={supplierOptions}
+        onClose={() => setIsPartDialogOpen(false)}
+        onSave={handleSavePart}
+      />
 
       <Dialog open={isCategoryDialogOpen} onClose={() => setIsCategoryDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Управление категориями</DialogTitle>
@@ -1309,8 +1817,20 @@ const InventoryPage: React.FC = () => {
                 <Typography variant="body1">{getPartDisplayModel(selectedPart) || '-'}</Typography>
               </Grid>
               <Grid item xs={12} sm={6}>
+                <Typography variant="subtitle2" color="text.secondary">Локация</Typography>
+                <Typography variant="body1" fontWeight={700}>{getLocationLabel(selectedPart.warehouseId)}</Typography>
+              </Grid>
+              <Grid item xs={12} sm={6}>
                 <Typography variant="subtitle2" color="text.secondary">Остаток / порог уведомления</Typography>
                 <Typography variant="body1" fontWeight={700}>{selectedPart.quantity} / {getAlertThreshold(selectedPart)}</Typography>
+              </Grid>
+              <Grid item xs={12} sm={6}>
+                <Typography variant="subtitle2" color="text.secondary">Оптовая цена</Typography>
+                <Typography variant="body1" fontWeight={700}>{formatPrice(Number(selectedPart.wholesalePrice) || 0)}</Typography>
+              </Grid>
+              <Grid item xs={12} sm={6}>
+                <Typography variant="subtitle2" color="text.secondary">Розничная цена</Typography>
+                <Typography variant="body1" fontWeight={700}>{formatPrice(getRetailPrice(selectedPart))}</Typography>
               </Grid>
               <Grid item xs={12} sm={6}>
                 <Typography variant="subtitle2" color="text.secondary">Порог уведомления</Typography>
@@ -1389,166 +1909,47 @@ const InventoryPage: React.FC = () => {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={isReceiptDialogOpen} onClose={() => setIsReceiptDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Оприходование запчасти</DialogTitle>
-        <DialogContent>
-          {selectedPart && (
-            <Grid container spacing={2} sx={{ mt: 1 }}>
-              <Grid item xs={12}>
-                <Typography variant="subtitle1" fontWeight={700}>
-                  {selectedPart.name}
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Текущий остаток: {selectedPart.quantity} шт.
-                </Typography>
-              </Grid>
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Количество"
-                  type="number"
-                  value={receiptQuantity}
-                  onChange={(event) => setReceiptQuantity(event.target.value)}
-                />
-              </Grid>
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Себестоимость за единицу"
-                  type="number"
-                  value={receiptUnitCost}
-                  onChange={(event) => setReceiptUnitCost(event.target.value)}
-                  InputProps={{
-                    endAdornment: <InputAdornment position="end">₽</InputAdornment>,
-                  }}
-                />
-              </Grid>
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Документ / накладная"
-                  value={receiptDocumentNumber}
-                  onChange={(event) => setReceiptDocumentNumber(event.target.value)}
-                />
-              </Grid>
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Основание"
-                  value={receiptReason}
-                  onChange={(event) => setReceiptReason(event.target.value)}
-                />
-              </Grid>
-            </Grid>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsReceiptDialogOpen(false)}>Отмена</Button>
-          <Button variant="contained" onClick={handleReceiveStock}>
-            Сохранить поступление
-          </Button>
-        </DialogActions>
-      </Dialog>
+      <InventoryReceiptDialog
+        open={isReceiptDialogOpen}
+        part={selectedPart}
+        onClose={() => setIsReceiptDialogOpen(false)}
+        onSubmit={handleReceiveStock}
+      />
 
-      <Dialog open={isWriteoffDialogOpen} onClose={() => setIsWriteoffDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>{writeoffMode === 'order' ? 'Списание в заказ' : 'Списание запчасти'}</DialogTitle>
-        <DialogContent>
-          {selectedPart && (
-            <Grid container spacing={2} sx={{ mt: 1 }}>
-              <Grid item xs={12}>
-                <Typography variant="subtitle1" fontWeight={700}>
-                  {selectedPart.name}
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Доступно на складе: {selectedPart.quantity} шт.
-                </Typography>
-              </Grid>
-              <Grid item xs={12} sm={6}>
-                <FormControl fullWidth>
-                  <InputLabel>Режим</InputLabel>
-                  <Select value={writeoffMode} label="Режим" onChange={(event) => setWriteoffMode(event.target.value as 'manual' | 'order')}>
-                    <MenuItem value="manual">Ручное списание</MenuItem>
-                    <MenuItem value="order">Списание в заказ</MenuItem>
-                  </Select>
-                </FormControl>
-              </Grid>
-              <Grid item xs={12} sm={6}>
-                <TextField
-                  fullWidth
-                  label="Количество"
-                  type="number"
-                  value={writeoffQuantity}
-                  onChange={(event) => setWriteoffQuantity(event.target.value)}
-                />
-              </Grid>
-              {writeoffMode === 'order' ? (
-                <Grid item xs={12}>
-                  <FormControl fullWidth>
-                    <InputLabel>Заказ</InputLabel>
-                    <Select value={writeoffOrderId} label="Заказ" onChange={(event) => setWriteoffOrderId(event.target.value)}>
-                      {activeOrders.map((order) => (
-                        <MenuItem key={order.id} value={order.id}>
-                          {order.orderNumber} · {order.clientName || 'Клиент'} · {order.deviceBrand} {order.deviceModel}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                </Grid>
-              ) : (
-                <Grid item xs={12}>
-                  <TextField
-                    fullWidth
-                    label="Основание"
-                    value={writeoffReason}
-                    onChange={(event) => setWriteoffReason(event.target.value)}
-                  />
-                </Grid>
-              )}
-            </Grid>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsWriteoffDialogOpen(false)}>Отмена</Button>
-          <Button variant="contained" color="warning" onClick={handleWriteoffStock}>
-            Списать
-          </Button>
-        </DialogActions>
-      </Dialog>
+      <InventoryWriteoffDialog
+        open={isWriteoffDialogOpen}
+        part={selectedPart}
+        initialMode={writeoffInitialMode}
+        activeOrders={activeOrders}
+        onClose={() => setIsWriteoffDialogOpen(false)}
+        onRequestOrders={loadOrdersForWriteoff}
+        onSubmit={handleWriteoffStock}
+      />
 
-      <Dialog open={isSellDialogOpen} onClose={() => setIsSellDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Продажа товара</DialogTitle>
-        <DialogContent>
-          {selectedPart && (
-            <Grid container spacing={2} sx={{ mt: 1 }}>
-              <Grid item xs={12}>
-                <Typography variant="subtitle1" fontWeight={700}>{selectedPart.name}</Typography>
-                <Typography variant="body2" color="text.secondary">Остаток: {selectedPart.quantity} шт.</Typography>
-              </Grid>
-              <Grid item xs={12} md={6}>
-                <TextField fullWidth label="Количество" type="number" value={saleQuantity} onChange={(e) => setSaleQuantity(e.target.value)} />
-              </Grid>
-              <Grid item xs={12} md={6}>
-                <TextField fullWidth label="Цена продажи, ₽" type="number" value={salePrice} onChange={(e) => setSalePrice(e.target.value)} />
-              </Grid>
-              <Grid item xs={12}>
-                <FormControl fullWidth>
-                  <InputLabel>Способ оплаты</InputLabel>
-                  <Select value={salePaymentMethod} label="Способ оплаты" onChange={(e) => setSalePaymentMethod(e.target.value as any)}>
-                    <MenuItem value="cash">Наличные</MenuItem>
-                    <MenuItem value="card">Карта</MenuItem>
-                    <MenuItem value="transfer">Перевод</MenuItem>
-                    <MenuItem value="installment">Рассрочка</MenuItem>
-                  </Select>
-                </FormControl>
-              </Grid>
-            </Grid>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIsSellDialogOpen(false)}>Отмена</Button>
-          <Button variant="contained" onClick={handleSellItem}>Продать</Button>
-        </DialogActions>
-      </Dialog>
+      <InventorySellDialog
+        open={isSellDialogOpen}
+        part={selectedPart}
+        defaultPrice={sellDefaultPrice}
+        onClose={() => setIsSellDialogOpen(false)}
+        onSubmit={handleSellItem}
+      />
+
+      <DataExchangeDialog
+        open={dataExchangeOpen}
+        onClose={() => setDataExchangeOpen(false)}
+        title="Импорт и экспорт товаров"
+        entityLabel="товаров"
+        fileBaseName="sklad"
+        sheetName="Склад"
+        columns={INVENTORY_EXCHANGE_COLUMNS}
+        exportRows={inventoryExchangeExportRows}
+        templateSamples={inventoryTemplateSamples()}
+        onImport={(rows, options) => importInventoryRows(rows, options)}
+        onImported={async () => {
+          await refreshInventory();
+        }}
+      />
+
     </Box>
   );
 };

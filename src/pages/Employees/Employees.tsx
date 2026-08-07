@@ -1,5 +1,6 @@
 ﻿import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Avatar,
   Box,
   Button,
@@ -21,6 +22,8 @@ import {
   Select,
   Stack,
   Switch,
+  Tab,
+  Tabs,
   Table,
   TableBody,
   TableCell,
@@ -33,6 +36,7 @@ import {
 } from '@mui/material';
 import {
   Add,
+  AdminPanelSettings,
   Assignment,
   CalendarMonth,
   ChevronLeft,
@@ -41,6 +45,7 @@ import {
   Edit,
   FilterList,
   Person,
+  PersonRemove,
   Search,
   Star,
   TrendingUp,
@@ -55,16 +60,41 @@ import { DataGrid, GridColDef } from '@mui/x-data-grid';
 import toast from 'react-hot-toast';
 import dayjs from 'dayjs';
 import 'dayjs/locale/ru';
-import { Employee, EmployeeScheduleEntry, EmployeeScheduleRosterEntry, EmployeeTask, EmployeeTaskStatus, Order, TaxonomyNode } from '../../types';
+import { AppSettings, Employee, EmployeeScheduleEntry, EmployeeScheduleRosterEntry, EmployeeTask, EmployeeTaskStatus, Order, TaxonomyNode } from '../../types';
+import { useAuth } from '../../hooks/useAuth';
+import { useCompanyName } from '../../hooks/useCompanyName';
 import { employeeService } from '../../services/employeeService';
-import { employeeWorkService } from '../../services/employeeWorkService';
+import { employeeWorkService, formatScheduleSlotLabel, normalizeScheduleTime } from '../../services/employeeWorkService';
 import { orderService } from '../../services/orderService';
 import { taxonomyService } from '../../services/taxonomyService';
 import PeriodFilter from '../../components/PeriodFilter/PeriodFilter';
-import { heroCardSx, pageShellSx, panelCardSx, sectionTitleSx, toolbarCardSx } from '../../styles/ui';
+import { dataGridSx, heroCardSx, pageShellSx, panelCardSx, sectionTitleSx, toolbarCardSx } from '../../styles/ui';
 import { defaultPeriodFilterValue, isDateWithinRange, PeriodFilterValue } from '../../utils/dateRange';
+import {
+  getEmployeeOrderEarnings,
+  getOrderPartsCost,
+  getOrderTotal,
+  isOrderDeliveryManager,
+  isOrderIntakeManager,
+  isOrderTechnician,
+} from '../../utils/orderMetrics';
+import {
+  CRM_MODULE_OPTIONS,
+  employeeNeedsAccessSettings,
+  normalizeAllowedModules,
+} from '../../utils/employeeModuleAccess';
+import {
+  normalizeSelfEditableFields,
+  normalizeVisibleSections,
+  SELF_EDITABLE_FIELD_OPTIONS,
+  SETTINGS_SECTION_OPTIONS,
+} from '../../utils/employeeSettingsAccess';
+import EmployeeAccessSettings, {
+  createDefaultEmployeeAccessFormState,
+  EmployeeAccessFormState,
+} from '../../components/EmployeeAccessSettings/EmployeeAccessSettings';
 
-const roleOptions = [
+const ROLE_OPTIONS: Array<{ value: Employee['role']; label: string }> = [
   { value: 'admin', label: 'Администратор' },
   { value: 'manager', label: 'Менеджер' },
   { value: 'technician', label: 'Техник' },
@@ -78,16 +108,29 @@ const emptyEmployee = {
   loginEmail: '',
   password: '',
   canLogin: true,
-  role: '',
+  role: 'manager' as Employee['role'],
   position: '',
   department: '',
   salary: '',
   intakeRate: '0',
   executionRate: '0',
   deliveryRate: '0',
+  ...createDefaultEmployeeAccessFormState(),
 };
 
 type EmployeeFormState = typeof emptyEmployee;
+
+const buildEmployeeAccessPayload = (form: EmployeeAccessFormState) => ({
+  allowedModules: normalizeAllowedModules(form.allowedModules),
+  visibleSections: normalizeVisibleSections(form.visibleSections),
+  selfEditableFields: normalizeSelfEditableFields(form.selfEditableFields),
+});
+
+const employeeToAccessForm = (employee: Employee): EmployeeAccessFormState => ({
+  allowedModules: normalizeAllowedModules(employee.access?.allowedModules),
+  visibleSections: normalizeVisibleSections(employee.access?.visibleSections),
+  selfEditableFields: normalizeSelfEditableFields(employee.access?.selfEditableFields),
+});
 
 const emptyScheduleForm = {
   id: '',
@@ -142,6 +185,7 @@ const getMonthDates = (monthKey: string) => {
 };
 
 const EMPLOYEES_GRID_PAGE_SIZE_KEY = 'employees_grid_rows_per_page_v1';
+const SCHEDULE_LOCATION_KEY = 'employees_schedule_location_v1';
 const gridPageSizeOptions = [10, 50, 100];
 
 const getSavedGridPageSize = (key: string) => {
@@ -185,7 +229,14 @@ type EmployeeWithMetrics = Employee & {
 };
 
 const Employees: React.FC = () => {
+  const { user: currentUser, refreshUser } = useAuth();
+  const companyName = useCompanyName();
+  const isAdmin = currentUser?.role === 'admin';
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
+  const [isAccessDialogOpen, setIsAccessDialogOpen] = useState(false);
+  const [accessForm, setAccessForm] = useState<EmployeeAccessFormState>(createDefaultEmployeeAccessFormState());
+  const [addDialogTab, setAddDialogTab] = useState(0);
+  const [editDialogTab, setEditDialogTab] = useState(0);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
   const [isDirectoryDialogOpen, setIsDirectoryDialogOpen] = useState(false);
@@ -193,26 +244,29 @@ const Employees: React.FC = () => {
   const [isQuickTaskDialogOpen, setIsQuickTaskDialogOpen] = useState(false);
   const [selectedEmployee, setSelectedEmployee] = useState<Employee | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterRole, setFilterRole] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
   const [periodFilter, setPeriodFilter] = useState<PeriodFilterValue>(() => defaultPeriodFilterValue('month'));
   const [employeesData, setEmployeesData] = useState<Employee[]>([]);
   const [ordersData, setOrdersData] = useState<Order[]>([]);
-  const [departmentNodes, setDepartmentNodes] = useState<TaxonomyNode[]>([]);
   const [positionNodes, setPositionNodes] = useState<TaxonomyNode[]>([]);
-  const [newDepartmentName, setNewDepartmentName] = useState('');
   const [newPositionName, setNewPositionName] = useState('');
   const [newEmployee, setNewEmployee] = useState<EmployeeFormState>(emptyEmployee);
   const [editEmployee, setEditEmployee] = useState<EmployeeFormState>(emptyEmployee);
   const [scheduleEntries, setScheduleEntries] = useState<EmployeeScheduleEntry[]>([]);
+  const [pendingScheduleKeys, setPendingScheduleKeys] = useState<Set<string>>(() => new Set());
   const [scheduleRosterEntries, setScheduleRosterEntries] = useState<EmployeeScheduleRosterEntry[]>([]);
+  const [scheduleRosterHiddenEntries, setScheduleRosterHiddenEntries] = useState<EmployeeScheduleRosterEntry[]>([]);
   const [employeeTasks, setEmployeeTasks] = useState<EmployeeTask[]>([]);
   const [scheduleForm, setScheduleForm] = useState(emptyScheduleForm);
+  const [isSavingSchedule, setIsSavingSchedule] = useState(false);
   const [taskForm, setTaskForm] = useState(emptyTaskForm);
   const [quickTaskEmployeeId, setQuickTaskEmployeeId] = useState('');
   const [quickTaskDate, setQuickTaskDate] = useState(() => toDateKey(new Date()));
   const [scheduleRosterEmployeeId, setScheduleRosterEmployeeId] = useState('');
   const [scheduleMonth, setScheduleMonth] = useState(() => toMonthKey(new Date()));
+  const [scheduleLocation, setScheduleLocation] = useState(
+    () => localStorage.getItem(SCHEDULE_LOCATION_KEY) || ''
+  );
   const [rowsPerPage, setRowsPerPage] = useState(() => getSavedGridPageSize(EMPLOYEES_GRID_PAGE_SIZE_KEY));
 
   const refreshEmployees = async () => {
@@ -220,12 +274,19 @@ const Employees: React.FC = () => {
     await employeeService.refreshFromApi();
     const workSettings = await employeeWorkService.refresh();
     setEmployeesData(employeeService.getEmployees());
-    setDepartmentNodes(taxonomyService.getRoots('employee_departments'));
     setPositionNodes(taxonomyService.getRoots('employee_positions'));
     setScheduleEntries(workSettings.employeeWork.schedules);
     setScheduleRosterEntries(workSettings.employeeWork.rosterEntries);
+    setScheduleRosterHiddenEntries(workSettings.employeeWork.rosterHiddenEntries || []);
     setEmployeeTasks(workSettings.employeeWork.tasks);
     setOrdersData(await orderService.getOrders());
+  };
+
+  const applyWorkSettings = (settings: AppSettings) => {
+    setScheduleEntries(settings.employeeWork.schedules);
+    setScheduleRosterEntries(settings.employeeWork.rosterEntries);
+    setScheduleRosterHiddenEntries(settings.employeeWork.rosterHiddenEntries || []);
+    setEmployeeTasks(settings.employeeWork.tasks);
   };
 
   useEffect(() => {
@@ -239,10 +300,8 @@ const Employees: React.FC = () => {
       .reduce((sum, payment) => sum + payment.amount, 0);
 
   const employeesWithMetrics = useMemo<EmployeeWithMetrics[]>(
-    () => {
-      const normalize = (value?: string) => (value || '').trim().toLowerCase().replace(/\s+/g, ' ');
-
-      return employeesData.map((employee) => {
+    () =>
+      employeesData.map((employee) => {
         let intakeOrders = 0;
         let executionOrders = 0;
         let deliveryOrders = 0;
@@ -251,54 +310,53 @@ const Employees: React.FC = () => {
         let serviceRevenue = 0;
 
         ordersData.forEach((order) => {
-          const orderInPeriod = isDateWithinRange(order.createdAt, periodFilter);
-          const paidAmount = paidAmountByOrder(order);
-          const employeeName = normalize(employee.name);
-          const isIntake = normalize(order.intakeManagerName) === employeeName;
-          const isExecutor = normalize(order.technicianName) === employeeName;
-          const isDelivery = normalize(order.deliveryManagerName) === employeeName;
-          const isInvolved = isIntake || isExecutor || isDelivery;
+          const status = String(order.status || '').toLowerCase();
+          if (status === 'cancelled' || status === 'canceled') {
+            return;
+          }
 
-          if (orderInPeriod && isIntake) {
+          const paidAmount = paidAmountByOrder(order);
+          const hasPaidInPeriod = paidAmount > 0;
+          const orderInPeriod = isDateWithinRange(order.createdAt, periodFilter);
+          const inPeriod = orderInPeriod || hasPaidInPeriod;
+          if (!inPeriod) {
+            return;
+          }
+
+          const isIntake = isOrderIntakeManager(order, employee);
+          const isExecutor = isOrderTechnician(order, employee);
+          const isDelivery = isOrderDeliveryManager(order, employee);
+          const isInvolved = isIntake || isExecutor || isDelivery;
+          if (!isInvolved) {
+            return;
+          }
+
+          if (isIntake) {
             intakeOrders += 1;
           }
-
-          if (orderInPeriod && isExecutor) {
+          if (isExecutor) {
             executionOrders += 1;
           }
-
-          if (orderInPeriod && isDelivery) {
+          if (isDelivery) {
             deliveryOrders += 1;
           }
 
-          if (paidAmount <= 0) return;
+          // Как в карточке заказа: полная маржа × %, без урезания по оплате
+          const employeeCommission = getEmployeeOrderEarnings(order, employee);
+          pieceworkEarnings += employeeCommission;
 
-          if (isIntake) {
-            pieceworkEarnings += paidAmount * (employee.intakeRate / 100);
+          if (!hasPaidInPeriod) {
+            return;
           }
 
-          if (isExecutor) {
-            pieceworkEarnings += paidAmount * (employee.executionRate / 100);
-          }
+          const orderTotal = getOrderTotal(order);
+          const ratio = orderTotal > 0 ? Math.min(paidAmount / orderTotal, 1) : 1;
+          const partsCost = getOrderPartsCost(order) * ratio;
+          const orderMargin = Math.max(paidAmount - partsCost, 0);
+          const paidCommission = Math.min(employeeCommission * ratio, orderMargin);
 
-          if (isDelivery) {
-            pieceworkEarnings += paidAmount * (employee.deliveryRate / 100);
-          }
-
-          if (isInvolved) {
-            const partsCost = (order.parts || []).reduce((sum, part) => {
-              const partCost = Number((part as any)?.partInfo?.partCost ?? 0);
-              return sum + partCost;
-            }, 0);
-            const orderMargin = Math.max(paidAmount - partsCost, 0);
-            const employeeCommission =
-              (isIntake ? (orderMargin * (employee.intakeRate || 0)) / 100 : 0) +
-              (isExecutor ? (orderMargin * (employee.executionRate || 0)) / 100 : 0) +
-              (isDelivery ? (orderMargin * (employee.deliveryRate || 0)) / 100 : 0);
-
-            serviceRevenue += paidAmount;
-            serviceProfit += Math.max(orderMargin - employeeCommission, 0);
-          }
+          serviceRevenue += paidAmount;
+          serviceProfit += Math.max(orderMargin - paidCommission, 0);
         });
 
         return {
@@ -310,8 +368,7 @@ const Employees: React.FC = () => {
           serviceProfit: Math.round(serviceProfit),
           serviceRevenue: Math.round(serviceRevenue),
         };
-      });
-    },
+      }),
     [employeesData, ordersData, periodFilter]
   );
 
@@ -339,15 +396,14 @@ const Employees: React.FC = () => {
           employee.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
           employee.position.toLowerCase().includes(searchTerm.toLowerCase());
 
-        const matchesRole = filterRole === 'all' || employee.role === filterRole;
         const matchesStatus =
           filterStatus === 'all' ||
           (filterStatus === 'active' && employee.isActive) ||
           (filterStatus === 'inactive' && !employee.isActive);
 
-        return matchesSearch && matchesRole && matchesStatus;
+        return matchesSearch && matchesStatus;
       }),
-    [employeesWithMetrics, filterRole, filterStatus, searchTerm]
+    [employeesWithMetrics, filterStatus, searchTerm]
   );
 
   const selectedSchedule = useMemo(
@@ -375,9 +431,31 @@ const Employees: React.FC = () => {
   const scheduleMonthDates = useMemo(() => getMonthDates(scheduleMonth), [scheduleMonth]);
 
   const activeScheduleEmployees = useMemo(() => {
-    const monthRosterIds = new Set(scheduleRosterEntries.filter((entry) => entry.month === scheduleMonth).map((entry) => entry.employeeId));
-    return employeesWithMetrics.filter((employee) => employee.isActive || monthRosterIds.has(employee.id));
-  }, [employeesWithMetrics, scheduleMonth, scheduleRosterEntries]);
+    const monthRosterIds = new Set(
+      scheduleRosterEntries.filter((entry) => entry.month === scheduleMonth).map((entry) => entry.employeeId)
+    );
+    const monthHiddenIds = new Set(
+      scheduleRosterHiddenEntries.filter((entry) => entry.month === scheduleMonth).map((entry) => entry.employeeId)
+    );
+    return employeesWithMetrics.filter(
+      (employee) =>
+        !monthHiddenIds.has(employee.id) && (employee.isActive || monthRosterIds.has(employee.id))
+    );
+  }, [employeesWithMetrics, scheduleMonth, scheduleRosterEntries, scheduleRosterHiddenEntries]);
+
+  const scheduleLocationOptions = employeeWorkService.getSettings().locations.items.filter(Boolean);
+
+  useEffect(() => {
+    if (scheduleLocationOptions.length === 0) {
+      return;
+    }
+    if (scheduleLocationOptions.includes(scheduleLocation)) {
+      return;
+    }
+    const next = scheduleLocationOptions[0];
+    setScheduleLocation(next);
+    localStorage.setItem(SCHEDULE_LOCATION_KEY, next);
+  }, [scheduleLocationOptions, scheduleLocation]);
 
   const scheduleRosterCandidates = useMemo(() => {
     const visibleIds = new Set(activeScheduleEmployees.map((employee) => employee.id));
@@ -408,20 +486,25 @@ const Employees: React.FC = () => {
     return map;
   }, [scheduleEntries]);
 
-  const scheduleEmployeeColumnWidth = 200;
+  const scheduleEmployeeColumnWidth = 248;
   const scheduleDayColumnWidth = useMemo(
     () => `calc((100% - ${scheduleEmployeeColumnWidth}px) / ${Math.max(scheduleMonthDates.length, 1)})`,
     [scheduleMonthDates.length]
   );
 
   const getDefaultScheduleForm = (date = toDateKey(new Date())) => {
-    const { employees } = employeeWorkService.getSettings();
+    const { employees, locations } = employeeWorkService.getSettings();
+    const defaultLocation =
+      (scheduleLocation && locations.items.includes(scheduleLocation) ? scheduleLocation : '') ||
+      locations.items[0] ||
+      '';
 
     return {
       ...emptyScheduleForm,
       date,
       startTime: employees.defaultWorkStartTime || emptyScheduleForm.startTime,
       endTime: employees.defaultWorkEndTime || emptyScheduleForm.endTime,
+      location: defaultLocation,
     };
   };
 
@@ -434,26 +517,101 @@ const Employees: React.FC = () => {
 
   const openScheduleDay = (employee: Employee, dateKey: string) => {
     const entry = scheduleByEmployeeAndDate.get(`${employee.id}_${dateKey}`);
+    const defaults = getDefaultScheduleForm(dateKey);
     setSelectedEmployee(employee);
     setTaskForm(emptyTaskForm);
-    setScheduleForm(entry ? { ...getDefaultScheduleForm(dateKey), ...entry } : getDefaultScheduleForm(dateKey));
+    setScheduleForm(
+      entry
+        ? {
+            ...defaults,
+            ...entry,
+            startTime: normalizeScheduleTime(entry.startTime, defaults.startTime),
+            endTime: normalizeScheduleTime(entry.endTime, defaults.endTime),
+          }
+        : defaults
+    );
     setIsWorkDialogOpen(true);
   };
 
   const handleCreateDefaultShift = async (employee: Employee, dateKey: string) => {
-    const { employees } = employeeWorkService.getSettings();
+    const cellKey = `${employee.id}_${dateKey}`;
+    if (pendingScheduleKeys.has(cellKey) || scheduleByEmployeeAndDate.has(cellKey)) {
+      return;
+    }
 
-    await employeeWorkService.saveScheduleEntry({
+    const { employees, locations } = employeeWorkService.getSettings();
+    const startTime = employees.defaultWorkStartTime || '10:00';
+    const endTime = employees.defaultWorkEndTime || '19:00';
+    const location =
+      (scheduleLocation && locations.items.includes(scheduleLocation) ? scheduleLocation : '') ||
+      locations.items[0] ||
+      '';
+    const peerEmployeeIds = activeScheduleEmployees
+      .map((item) => item.id)
+      .filter((id) => id !== employee.id);
+    const optimisticId = `schedule_${Date.now()}`;
+    const optimisticEntry: EmployeeScheduleEntry = {
+      id: optimisticId,
       employeeId: employee.id,
       date: dateKey,
-      startTime: employees.defaultWorkStartTime || '10:00',
-      endTime: employees.defaultWorkEndTime || '19:00',
-      location: '',
+      startTime,
+      endTime,
+      location,
       note: '',
       isDayOff: false,
-    });
-    await refreshEmployees();
-    toast.success('Смена добавлена');
+      updatedAt: new Date().toISOString(),
+    };
+    const optimisticDayOffs: EmployeeScheduleEntry[] = peerEmployeeIds.map((employeeId, index) => ({
+      id: `schedule_dayoff_${Date.now()}_${index}`,
+      employeeId,
+      date: dateKey,
+      startTime,
+      endTime,
+      location,
+      note: '',
+      isDayOff: true,
+      updatedAt: new Date().toISOString(),
+    }));
+
+    setPendingScheduleKeys((prev) => new Set(prev).add(cellKey));
+    setScheduleEntries((prev) => [
+      ...prev.filter(
+        (entry) =>
+          !(entry.date === dateKey && (entry.employeeId === employee.id || peerEmployeeIds.includes(entry.employeeId)))
+      ),
+      optimisticEntry,
+      ...optimisticDayOffs,
+    ]);
+
+    try {
+      const saved = await employeeWorkService.saveScheduleEntry(
+        {
+          employeeId: employee.id,
+          date: dateKey,
+          startTime,
+          endTime,
+          location,
+          note: '',
+          isDayOff: false,
+        },
+        { dayOffForEmployeeIds: peerEmployeeIds }
+      );
+      setScheduleEntries(saved.employeeWork.schedules);
+    } catch {
+      setScheduleEntries((prev) =>
+        prev.filter(
+          (entry) =>
+            entry.id !== optimisticId && !optimisticDayOffs.some((dayOff) => dayOff.id === entry.id)
+        )
+      );
+      toast.error('Не удалось добавить смену');
+    } finally {
+      setPendingScheduleKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(cellKey);
+        return next;
+      });
+    }
   };
 
   const moveScheduleMonth = (months: number) => {
@@ -468,26 +626,111 @@ const Employees: React.FC = () => {
       return;
     }
 
-    await employeeWorkService.addScheduleRosterEmployee(scheduleRosterEmployeeId, scheduleMonth);
+    const updatedSettings = await employeeWorkService.addScheduleRosterEmployee(scheduleRosterEmployeeId, scheduleMonth);
     setScheduleRosterEmployeeId('');
-    await refreshEmployees();
+    applyWorkSettings(updatedSettings);
     toast.success('Сотрудник добавлен в график месяца');
   };
 
-  const handleSaveSchedule = async () => {
-    if (!selectedEmployee) return;
-    if (!scheduleForm.date) {
+  const handleRemoveFromSchedule = async (employee: Employee) => {
+    const updatedSettings = await employeeWorkService.removeScheduleRosterEmployee(employee.id, scheduleMonth);
+    applyWorkSettings(updatedSettings);
+    toast.success(`${employee.name} убран из графика`);
+  };
+
+  const persistScheduleEntry = async (
+    form: typeof emptyScheduleForm,
+    options?: { successMessage?: string; resetForm?: boolean }
+  ) => {
+    if (!selectedEmployee) {
+      return null;
+    }
+    if (!form.date) {
+      toast.error('Укажите дату смены');
+      return null;
+    }
+
+    setIsSavingSchedule(true);
+    try {
+      const dayOffForEmployeeIds = form.isDayOff
+        ? undefined
+        : activeScheduleEmployees.map((item) => item.id).filter((id) => id !== selectedEmployee.id);
+      const saved = await employeeWorkService.saveScheduleEntry(
+        {
+          ...form,
+          employeeId: selectedEmployee.id,
+        },
+        { dayOffForEmployeeIds }
+      );
+      applyWorkSettings(saved);
+      const savedEntry = saved.employeeWork.schedules.find(
+        (entry) => entry.employeeId === selectedEmployee.id && entry.date === form.date
+      );
+      if (savedEntry) {
+        setScheduleForm({ ...getDefaultScheduleForm(form.date), ...savedEntry });
+      } else if (options?.resetForm) {
+        setScheduleForm(getDefaultScheduleForm());
+      }
+      if (options?.successMessage) {
+        toast.success(options.successMessage);
+      }
+      return saved;
+    } catch {
+      toast.error('Не удалось сохранить график');
+      return null;
+    } finally {
+      setIsSavingSchedule(false);
+    }
+  };
+
+  const handleScheduleDayOffChange = async (checked: boolean) => {
+    if (!selectedEmployee || !scheduleForm.date) {
       toast.error('Укажите дату смены');
       return;
     }
 
-    await employeeWorkService.saveScheduleEntry({
+    const previousForm = scheduleForm;
+    const { employees } = employeeWorkService.getSettings();
+    const defaultStart = employees.defaultWorkStartTime || '10:00';
+    const defaultEnd = employees.defaultWorkEndTime || '19:00';
+    const nextForm = {
       ...scheduleForm,
-      employeeId: selectedEmployee.id,
+      isDayOff: checked,
+      startTime: scheduleForm.startTime || defaultStart,
+      endTime: scheduleForm.endTime || defaultEnd,
+    };
+
+    setScheduleForm(nextForm);
+
+    const saved = await persistScheduleEntry(nextForm, {
+      successMessage: checked ? 'Выходной сохранён, смена убрана' : 'Рабочий день восстановлен',
     });
-    setScheduleForm(emptyScheduleForm);
-    await refreshEmployees();
-    toast.success('График сохранен');
+
+    if (!saved) {
+      setScheduleForm(previousForm);
+    }
+  };
+
+  const handleScheduleFieldPersist = async (patch: Partial<typeof emptyScheduleForm>) => {
+    if (!selectedEmployee || !scheduleForm.id || scheduleForm.isDayOff || isSavingSchedule) {
+      return;
+    }
+
+    const nextForm = { ...scheduleForm, ...patch };
+    setScheduleForm(nextForm);
+    await persistScheduleEntry(nextForm, { successMessage: 'Смена обновлена' });
+  };
+
+  const handleSaveSchedule = async () => {
+    if (!selectedEmployee) return;
+
+    await persistScheduleEntry(scheduleForm, {
+      successMessage: scheduleForm.isDayOff
+        ? 'Выходной сохранён'
+        : scheduleForm.id
+          ? 'Смена обновлена'
+          : 'Смена добавлена',
+    });
   };
 
   const handleSaveTask = async () => {
@@ -497,14 +740,14 @@ const Employees: React.FC = () => {
       return;
     }
 
-    await employeeWorkService.saveTask({
+    const saved = await employeeWorkService.saveTask({
       ...taskForm,
       employeeId: selectedEmployee.id,
       title: taskForm.title.trim(),
       progress: Number(taskForm.progress) || 0,
     });
     setTaskForm(emptyTaskForm);
-    await refreshEmployees();
+    applyWorkSettings(saved);
     toast.success('Задача сохранена');
   };
 
@@ -519,7 +762,7 @@ const Employees: React.FC = () => {
       return;
     }
 
-    await employeeWorkService.saveTask({
+    const saved = await employeeWorkService.saveTask({
       ...taskForm,
       employeeId: quickTaskEmployeeId,
       title: taskForm.title.trim(),
@@ -528,13 +771,40 @@ const Employees: React.FC = () => {
     });
     setTaskForm(emptyTaskForm);
     setIsQuickTaskDialogOpen(false);
-    await refreshEmployees();
+    applyWorkSettings(saved);
     toast.success('Задача поставлена');
   };
 
   const handleTaskProgressChange = async (task: EmployeeTask, status: EmployeeTaskStatus, progress: number) => {
-    await employeeWorkService.updateTaskProgress(task.id, status, progress);
-    await refreshEmployees();
+    const saved = await employeeWorkService.updateTaskProgress(task.id, status, progress);
+    applyWorkSettings(saved);
+  };
+
+  const openAccessDialog = (employee: Employee) => {
+    if (!employeeNeedsAccessSettings(employee)) {
+      return;
+    }
+    setSelectedEmployee(employee);
+    setAccessForm(employeeToAccessForm(employee));
+    setIsAccessDialogOpen(true);
+  };
+
+  const handleSaveAccess = async () => {
+    if (!selectedEmployee) return;
+
+    try {
+      await employeeService.updateEmployee(selectedEmployee.id, {
+        access: buildEmployeeAccessPayload(accessForm),
+      });
+      await refreshEmployees();
+      if (currentUser?.id === selectedEmployee.id) {
+        await refreshUser();
+      }
+      setIsAccessDialogOpen(false);
+      toast.success('Настройки доступа сохранены');
+    } catch {
+      toast.error('Не удалось сохранить настройки доступа');
+    }
   };
 
   const openEditDialog = (employee: Employee) => {
@@ -553,20 +823,10 @@ const Employees: React.FC = () => {
       intakeRate: String(employee.intakeRate || 0),
       executionRate: String(employee.executionRate || 0),
       deliveryRate: String(employee.deliveryRate || 0),
+      ...employeeToAccessForm(employee),
     });
+    setEditDialogTab(0);
     setIsEditDialogOpen(true);
-  };
-
-  const handleCreateDepartment = async () => {
-    if (!newDepartmentName.trim()) {
-      toast.error('Введите название отдела');
-      return;
-    }
-
-    await taxonomyService.addNode('employee_departments', newDepartmentName.trim(), null);
-    setNewDepartmentName('');
-    await refreshEmployees();
-    toast.success('Отдел добавлен');
   };
 
   const handleCreatePosition = async () => {
@@ -581,17 +841,6 @@ const Employees: React.FC = () => {
     toast.success('Должность добавлена');
   };
 
-  const handleDeleteDepartment = async (node: TaxonomyNode) => {
-    if (employeesData.some((employee) => employee.department === node.name)) {
-      toast.error('Сначала измените отдел у сотрудников');
-      return;
-    }
-
-    await taxonomyService.deleteNode(node.id);
-    await refreshEmployees();
-    toast.success('Отдел удален');
-  };
-
   const handleDeletePosition = async (node: TaxonomyNode) => {
     if (employeesData.some((employee) => employee.position === node.name)) {
       toast.error('Сначала измените должность у сотрудников');
@@ -603,8 +852,8 @@ const Employees: React.FC = () => {
     toast.success('Должность удалена');
   };
   const handleCreateEmployee = async () => {
-    if (!newEmployee.name || !newEmployee.role) {
-      toast.error('Заполните обязательные поля сотрудника');
+    if (!newEmployee.name || !newEmployee.position) {
+      toast.error('Заполните ФИО и должность');
       return;
     }
 
@@ -616,8 +865,8 @@ const Employees: React.FC = () => {
         loginEmail: newEmployee.loginEmail.trim(),
         password: newEmployee.password || '',
         canLogin: newEmployee.canLogin,
-        role: newEmployee.role as Employee['role'],
-        department: newEmployee.department,
+        role: newEmployee.role,
+        department: '',
         position: newEmployee.position,
         salary: Number(newEmployee.salary) || 0,
         intakeRate: Number(newEmployee.intakeRate) || 0,
@@ -628,11 +877,14 @@ const Employees: React.FC = () => {
         completedOrders: 0,
         totalEarnings: 0,
         isActive: true,
+        ...(isAdmin && employeeNeedsAccessSettings(newEmployee)
+          ? { access: buildEmployeeAccessPayload(newEmployee) }
+          : {}),
       });
 
       await refreshEmployees();
       setIsAddDialogOpen(false);
-      setNewEmployee(emptyEmployee);
+      setNewEmployee({ ...emptyEmployee, ...createDefaultEmployeeAccessFormState() });
       toast.success('Сотрудник добавлен');
     } catch (error) {
       toast.error('Не удалось добавить сотрудника');
@@ -650,16 +902,22 @@ const Employees: React.FC = () => {
         loginEmail: editEmployee.loginEmail.trim(),
         ...(editEmployee.password ? { password: editEmployee.password } : {}),
         canLogin: editEmployee.canLogin,
-        role: editEmployee.role as Employee['role'],
+        role: editEmployee.role,
         department: editEmployee.department,
         position: editEmployee.position,
         salary: Number(editEmployee.salary) || 0,
         intakeRate: Number(editEmployee.intakeRate) || 0,
         executionRate: Number(editEmployee.executionRate) || 0,
         deliveryRate: Number(editEmployee.deliveryRate) || 0,
+        ...(isAdmin && employeeNeedsAccessSettings(editEmployee)
+          ? { access: buildEmployeeAccessPayload(editEmployee) }
+          : {}),
       });
 
       await refreshEmployees();
+      if (currentUser?.id === selectedEmployee.id) {
+        await refreshUser();
+      }
       setIsEditDialogOpen(false);
       toast.success('Сотрудник обновлен');
     } catch (error) {
@@ -671,76 +929,83 @@ const Employees: React.FC = () => {
     {
       field: 'name',
       headerName: 'Сотрудник',
-      flex: 1,
-      minWidth: 260,
+      flex: 1.5,
+      minWidth: 150,
       renderCell: (params) => (
-        <Box display="flex" alignItems="center">
-          <Avatar sx={{ ...employeeAvatarSx, mr: 2 }}>
+        <Box display="flex" alignItems="center" sx={{ minWidth: 0 }}>
+          <Avatar sx={{ ...employeeAvatarSx, mr: 1.5, width: 34, height: 34, fontSize: 14 }}>
             {getEmployeeInitials(params.row.name)}
           </Avatar>
-          <Box>
-            <Typography variant="body2" fontWeight={700}>{params.row.name}</Typography>
-            <Typography variant="caption" color="text.secondary">{params.row.position}</Typography>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography variant="body2" fontWeight={700} noWrap>
+              {params.row.name}
+            </Typography>
+            <Typography variant="caption" color="text.secondary" noWrap>
+              {params.row.position}
+            </Typography>
           </Box>
         </Box>
       ),
     },
     {
-      field: 'role',
-      headerName: 'Роль',
-      width: 150,
-      renderCell: (params) => {
-        const roleLabel = roleOptions.find((role) => role.value === params.value)?.label || params.value;
-        return <Chip label={roleLabel} color="warning" size="small" />;
-      },
-    },
-    {
-      field: 'department',
-      headerName: 'Отдел',
-      width: 150,
-    },
-    {
       field: 'commission',
       headerName: 'Сделка, %',
-      width: 180,
+      flex: 1,
+      minWidth: 108,
       renderCell: (params) => (
-        <Typography variant="body2">П:{params.row.intakeRate} / И:{params.row.executionRate} / В:{params.row.deliveryRate}</Typography>
+        <Typography variant="body2" noWrap>
+          П:{params.row.intakeRate} / И:{params.row.executionRate} / В:{params.row.deliveryRate}
+        </Typography>
       ),
     },
     {
       field: 'totalEarnings',
       headerName: 'Сдельно',
-      width: 140,
+      flex: 0.8,
+      minWidth: 88,
       renderCell: (params) => (
-        <Typography variant="body2" fontWeight={700} color="success.main">{Number(params.value || 0).toLocaleString('ru-RU')} ₽</Typography>
+        <Typography variant="body2" fontWeight={700} color="success.main" noWrap>
+          {Number(params.value || 0).toLocaleString('ru-RU')} ₽
+        </Typography>
       ),
     },
     {
       field: 'serviceProfit',
       headerName: 'Прибыль сервису',
-      width: 170,
+      flex: 0.9,
+      minWidth: 92,
       renderCell: (params) => (
-        <Typography variant="body2" fontWeight={700} color="primary.main">
+        <Typography variant="body2" fontWeight={700} color="primary.main" noWrap>
           {Number(params.value || 0).toLocaleString('ru-RU')} ₽
         </Typography>
       ),
     },
     {
       field: 'completedOrders',
-      headerName: 'Исполнено',
-      width: 120,
+      headerName: 'Исполн.',
+      flex: 0.6,
+      minWidth: 72,
       renderCell: (params) => <Chip label={params.value} color="success" size="small" />,
     },
     {
       field: 'actions',
       headerName: 'Действия',
-      width: 180,
+      flex: 0,
+      minWidth: isAdmin ? 156 : 124,
       sortable: false,
+      disableColumnMenu: true,
       renderCell: (params) => (
-        <Box>
-          <IconButton size="small" onClick={() => { setSelectedEmployee(params.row); setIsViewDialogOpen(true); }}><Visibility /></IconButton>
-          <IconButton size="small" onClick={() => openWorkDialog(params.row)}><CalendarMonth /></IconButton>
-          <IconButton size="small" onClick={() => openEditDialog(params.row)}><Edit /></IconButton>
+        <Box sx={{ display: 'flex', alignItems: 'center', ml: -0.5 }}>
+          <IconButton size="small" onClick={() => { setSelectedEmployee(params.row); setIsViewDialogOpen(true); }}><Visibility fontSize="small" /></IconButton>
+          {isAdmin && employeeNeedsAccessSettings(params.row) && (
+            <Tooltip title="Настройки доступа">
+              <IconButton size="small" color="primary" onClick={() => openAccessDialog(params.row)}>
+                <AdminPanelSettings fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
+          <IconButton size="small" onClick={() => openWorkDialog(params.row)}><CalendarMonth fontSize="small" /></IconButton>
+          <IconButton size="small" onClick={() => openEditDialog(params.row)}><Edit fontSize="small" /></IconButton>
           <IconButton
             size="small"
             onClick={async () => {
@@ -753,7 +1018,7 @@ const Employees: React.FC = () => {
               }
             }}
           >
-            <Delete />
+            <Delete fontSize="small" />
           </IconButton>
         </Box>
       ),
@@ -764,7 +1029,7 @@ const Employees: React.FC = () => {
     <Box sx={pageShellSx}>
       <Box sx={heroCardSx}>
         <Typography variant="overline" sx={{ color: 'rgba(255,255,255,0.68)', letterSpacing: 1.4 }}>CRM · КОМАНДА</Typography>
-        <Typography variant="h3" sx={{ mt: 1.5, mb: 1.5, color: 'common.white' }}>Сотрудники НЭК Сервис</Typography>
+        <Typography variant="h3" sx={{ mt: 1.5, mb: 1.5, color: 'common.white' }}>Сотрудники {companyName}</Typography>
         <Typography sx={{ maxWidth: 760, color: 'rgba(255,255,255,0.78)' }}>
           Управление сотрудниками, ролями, отделами и производительностью. Здесь настраиваются проценты за прием, исполнение и выдачу заказа.
         </Typography>
@@ -797,46 +1062,103 @@ const Employees: React.FC = () => {
 
       <Card sx={panelCardSx}>
         <CardContent>
-          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', md: 'center' }} spacing={2} sx={{ mb: 2 }}>
-            <Box>
+          <Stack
+            direction={{ xs: 'column', md: 'row' }}
+            justifyContent="space-between"
+            alignItems={{ xs: 'stretch', md: 'center' }}
+            spacing={2}
+            sx={{ mb: 2 }}
+          >
+            <Box sx={{ minWidth: 0 }}>
               <Typography variant="h5" sx={sectionTitleSx}>График сотрудников</Typography>
               <Typography variant="body2" color="text.secondary">
                 Нажмите на день в строке сотрудника, чтобы назначить смену, выходной или задачу.
               </Typography>
             </Box>
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
-              <Tooltip title="Предыдущий месяц">
-                <IconButton
-                  color="primary"
-                  onClick={() => moveScheduleMonth(-1)}
-                  sx={{ width: 48, height: 48, border: '1px solid', borderColor: 'primary.light', borderRadius: 1.5 }}
-                >
-                  <ChevronLeft />
-                </IconButton>
-              </Tooltip>
-              <LocalizationProvider dateAdapter={AdapterDayjs} adapterLocale="ru">
-                <DatePicker
-                  views={['year', 'month']}
-                  openTo="month"
-                  label="Месяц"
-                  value={dayjs(`${scheduleMonth}-01`)}
-                  onChange={(value) => {
-                    if (value?.isValid()) {
-                      setScheduleMonth(value.format('YYYY-MM'));
-                    }
-                  }}
-                  renderInput={(params) => <TextField {...params} sx={{ minWidth: { xs: '100%', sm: 190 } }} />}
-                />
-              </LocalizationProvider>
-              <Tooltip title="Следующий месяц">
-                <IconButton
-                  color="primary"
-                  onClick={() => moveScheduleMonth(1)}
-                  sx={{ width: 48, height: 48, border: '1px solid', borderColor: 'primary.light', borderRadius: 1.5 }}
-                >
-                  <ChevronRight />
-                </IconButton>
-              </Tooltip>
+            <Stack
+              direction={{ xs: 'column', sm: 'row' }}
+              spacing={1}
+              alignItems={{ xs: 'stretch', sm: 'center' }}
+              flexWrap="wrap"
+              useFlexGap
+              sx={{
+                '& .MuiOutlinedInput-root': {
+                  height: 40,
+                  boxSizing: 'border-box',
+                  borderRadius: 1.5,
+                },
+                '& .MuiButton-root': {
+                  height: 40,
+                  minHeight: 40,
+                  boxSizing: 'border-box',
+                  borderRadius: 1.5,
+                  whiteSpace: 'nowrap',
+                },
+              }}
+            >
+              {scheduleLocationOptions.length > 0 && (
+                <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 168 } }}>
+                  <InputLabel id="schedule-location-label">Локация</InputLabel>
+                  <Select
+                    labelId="schedule-location-label"
+                    label="Локация"
+                    value={scheduleLocation}
+                    displayEmpty
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setScheduleLocation(value);
+                      localStorage.setItem(SCHEDULE_LOCATION_KEY, value);
+                    }}
+                  >
+                    {scheduleLocationOptions.map((locationName) => (
+                      <MenuItem key={locationName} value={locationName}>
+                        {locationName}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              )}
+              <Stack direction="row" spacing={0.75} alignItems="center">
+                <Tooltip title="Предыдущий месяц">
+                  <IconButton
+                    color="primary"
+                    onClick={() => moveScheduleMonth(-1)}
+                    sx={{ width: 40, height: 40, border: '1px solid', borderColor: 'divider', borderRadius: 1.5 }}
+                  >
+                    <ChevronLeft />
+                  </IconButton>
+                </Tooltip>
+                <LocalizationProvider dateAdapter={AdapterDayjs} adapterLocale="ru">
+                  <DatePicker
+                    views={['year', 'month']}
+                    openTo="month"
+                    value={dayjs(`${scheduleMonth}-01`)}
+                    onChange={(value) => {
+                      if (value?.isValid()) {
+                        setScheduleMonth(value.format('YYYY-MM'));
+                      }
+                    }}
+                    renderInput={({ label: _label, ...params }) => (
+                      <TextField
+                        {...params}
+                        size="small"
+                        label="Месяц"
+                        InputLabelProps={{ shrink: true }}
+                        sx={{ width: { xs: 160, sm: 168 } }}
+                      />
+                    )}
+                  />
+                </LocalizationProvider>
+                <Tooltip title="Следующий месяц">
+                  <IconButton
+                    color="primary"
+                    onClick={() => moveScheduleMonth(1)}
+                    sx={{ width: 40, height: 40, border: '1px solid', borderColor: 'divider', borderRadius: 1.5 }}
+                  >
+                    <ChevronRight />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
               <Button
                 variant="outlined"
                 startIcon={<Assignment />}
@@ -848,15 +1170,40 @@ const Employees: React.FC = () => {
               >
                 Поставить задачу
               </Button>
-              <Button variant="contained" startIcon={<Add />} onClick={() => setIsAddDialogOpen(true)}>Добавить сотрудника</Button>
+              <Button
+                variant="contained"
+                startIcon={<Add />}
+                onClick={() => {
+                  setAddDialogTab(0);
+                  setIsAddDialogOpen(true);
+                }}
+              >
+                Добавить сотрудника
+              </Button>
             </Stack>
           </Stack>
 
-          <TableContainer sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2, maxHeight: 560, overflowX: 'hidden' }}>
-            <Table stickyHeader size="small" sx={{ tableLayout: 'fixed', width: '100%' }}>
+          <TableContainer sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2, maxHeight: 560, overflowX: 'auto' }}>
+            <Table stickyHeader size="small" sx={{ tableLayout: 'fixed', width: '100%', minWidth: scheduleEmployeeColumnWidth + scheduleMonthDates.length * 36 }}>
               <TableHead>
                 <TableRow>
-                  <TableCell sx={{ width: scheduleEmployeeColumnWidth, maxWidth: scheduleEmployeeColumnWidth, fontWeight: 800, position: 'sticky', left: 0, zIndex: 3, bgcolor: 'background.paper' }}>Сотрудник</TableCell>
+                  <TableCell
+                    sx={{
+                      width: scheduleEmployeeColumnWidth,
+                      minWidth: scheduleEmployeeColumnWidth,
+                      maxWidth: scheduleEmployeeColumnWidth,
+                      fontWeight: 800,
+                      position: 'sticky',
+                      left: 0,
+                      zIndex: 3,
+                      bgcolor: 'background.paper',
+                      py: 1,
+                      borderRight: '1px solid',
+                      borderColor: 'divider',
+                    }}
+                  >
+                    Сотрудник
+                  </TableCell>
                   {scheduleMonthDates.map((date) => {
                     const isWeekend = date.getDay() === 0 || date.getDay() === 6;
 
@@ -866,16 +1213,18 @@ const Employees: React.FC = () => {
                         align="center"
                         sx={{
                           width: scheduleDayColumnWidth,
+                          minWidth: 36,
                           maxWidth: scheduleDayColumnWidth,
                           fontWeight: 800,
-                          px: 0.15,
+                          px: 0,
+                          py: 0.75,
                           bgcolor: isWeekend ? 'rgba(234, 88, 12, 0.08)' : 'background.paper',
                         }}
                       >
-                        <Typography variant="caption" fontWeight={800} sx={{ lineHeight: 1, color: isWeekend ? 'primary.main' : 'text.primary' }}>
+                        <Typography variant="caption" fontWeight={800} sx={{ lineHeight: 1.15, display: 'block', color: isWeekend ? 'primary.main' : 'text.primary' }}>
                           {date.toLocaleDateString('ru-RU', { day: '2-digit' })}
                         </Typography>
-                        <Typography variant="caption" color={isWeekend ? 'primary.main' : 'text.secondary'} display="block" sx={{ fontSize: 10, lineHeight: 1 }}>
+                        <Typography variant="caption" color={isWeekend ? 'primary.main' : 'text.secondary'} display="block" sx={{ fontSize: 10, lineHeight: 1.1, textTransform: 'lowercase' }}>
                           {date.toLocaleDateString('ru-RU', { weekday: 'short' })}
                         </Typography>
                       </TableCell>
@@ -886,13 +1235,45 @@ const Employees: React.FC = () => {
               <TableBody>
                 {activeScheduleEmployees.map((employee) => (
                   <TableRow key={employee.id} hover>
-                    <TableCell sx={{ width: scheduleEmployeeColumnWidth, maxWidth: scheduleEmployeeColumnWidth, position: 'sticky', left: 0, zIndex: 2, bgcolor: 'background.paper', py: 0.6 }}>
+                    <TableCell
+                      sx={{
+                        width: scheduleEmployeeColumnWidth,
+                        minWidth: scheduleEmployeeColumnWidth,
+                        maxWidth: scheduleEmployeeColumnWidth,
+                        position: 'sticky',
+                        left: 0,
+                        zIndex: 2,
+                        bgcolor: 'background.paper',
+                        py: 0.75,
+                        borderRight: '1px solid',
+                        borderColor: 'divider',
+                      }}
+                    >
                       <Box display="flex" alignItems="center" gap={1} sx={{ minWidth: 0 }}>
-                        <Avatar sx={{ ...employeeAvatarSx, width: 34, height: 34, fontSize: 14, flex: '0 0 auto' }}>{getEmployeeInitials(employee.name)}</Avatar>
-                        <Box sx={{ minWidth: 0 }}>
-                          <Typography variant="body2" fontWeight={800} noWrap sx={{ maxWidth: 138, lineHeight: 1.2 }}>{employee.name}</Typography>
-                          <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block', maxWidth: 138, lineHeight: 1.2 }}>{employee.position || employee.department}</Typography>
+                        <Avatar sx={{ ...employeeAvatarSx, width: 32, height: 32, fontSize: 13, flex: '0 0 auto' }}>
+                          {getEmployeeInitials(employee.name)}
+                        </Avatar>
+                        <Box sx={{ minWidth: 0, flex: 1, overflow: 'hidden' }}>
+                          <Typography variant="body2" fontWeight={700} noWrap sx={{ lineHeight: 1.25 }}>
+                            {employee.name}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block', lineHeight: 1.2 }}>
+                            {employee.position}
+                          </Typography>
                         </Box>
+                        <Tooltip title="Убрать из графика">
+                          <IconButton
+                            size="small"
+                            color="error"
+                            sx={{ flex: '0 0 auto', width: 28, height: 28 }}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleRemoveFromSchedule(employee);
+                            }}
+                          >
+                            <PersonRemove sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        </Tooltip>
                       </Box>
                     </TableCell>
                     {scheduleMonthDates.map((date) => {
@@ -908,9 +1289,10 @@ const Employees: React.FC = () => {
                           sx={{
                             cursor: 'pointer',
                             width: scheduleDayColumnWidth,
+                            minWidth: 36,
                             maxWidth: scheduleDayColumnWidth,
-                            px: 0.1,
-                            py: 0.65,
+                            px: 0,
+                            py: 0.5,
                             bgcolor: entry?.isDayOff
                               ? 'rgba(220, 38, 38, 0.05)'
                               : entry
@@ -921,32 +1303,58 @@ const Employees: React.FC = () => {
                             '&:hover': { bgcolor: 'rgba(234, 88, 12, 0.08)' },
                           }}
                         >
-                          {entry ? (
-                            <Box>
+                          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 28 }}>
+                            {entry ? (
                               <Chip
                                 size="small"
                                 color={entry.isDayOff ? 'default' : 'success'}
-                                label={entry.isDayOff ? 'В' : `${entry.startTime.slice(0, 2)}-${entry.endTime.slice(0, 2)}`}
-                                sx={{ height: 20, minWidth: 34, '& .MuiChip-label': { px: 0.55, fontSize: 10, fontWeight: 800 } }}
+                                label={
+                                  entry.isDayOff
+                                    ? 'В'
+                                    : (() => {
+                                        const start = normalizeScheduleTime(entry.startTime, '');
+                                        const end = normalizeScheduleTime(entry.endTime, '');
+                                        if (!start) return 'Смена';
+                                        const s = start.slice(0, 2);
+                                        const e = end.slice(0, 2);
+                                        return e ? `${s}–${e}` : s;
+                                      })()
+                                }
+                                sx={{
+                                  height: 24,
+                                  width: 'calc(100% - 4px)',
+                                  maxWidth: 44,
+                                  borderRadius: 1,
+                                  '& .MuiChip-label': {
+                                    px: 0.25,
+                                    fontSize: 10,
+                                    fontWeight: 800,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                  },
+                                }}
                               />
-                              {entry.location && (
-                                <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 0.5 }}>
-                                  {entry.location}
-                                </Typography>
-                              )}
-                            </Box>
-                          ) : (
-                            <IconButton
-                              size="small"
-                              sx={{ width: 24, height: 24 }}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                void handleCreateDefaultShift(employee, dateKey);
-                              }}
-                            >
-                              <Add fontSize="small" />
-                            </IconButton>
-                          )}
+                            ) : (
+                              <IconButton
+                                size="small"
+                                disabled={pendingScheduleKeys.has(`${employee.id}_${dateKey}`)}
+                                sx={{
+                                  width: 24,
+                                  height: 24,
+                                  borderRadius: 1,
+                                  border: '1px dashed',
+                                  borderColor: 'divider',
+                                  color: 'text.secondary',
+                                }}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleCreateDefaultShift(employee, dateKey);
+                                }}
+                              >
+                                <Add sx={{ fontSize: 16 }} />
+                              </IconButton>
+                            )}
+                          </Box>
                         </TableCell>
                       );
                     })}
@@ -960,10 +1368,24 @@ const Employees: React.FC = () => {
                   </TableRow>
                 )}
                 <TableRow>
-                  <TableCell sx={{ width: scheduleEmployeeColumnWidth, maxWidth: scheduleEmployeeColumnWidth, position: 'sticky', left: 0, zIndex: 2, bgcolor: 'background.paper', py: 1 }}>
+                  <TableCell
+                    sx={{
+                      width: scheduleEmployeeColumnWidth,
+                      minWidth: scheduleEmployeeColumnWidth,
+                      maxWidth: scheduleEmployeeColumnWidth,
+                      position: 'sticky',
+                      left: 0,
+                      zIndex: 2,
+                      bgcolor: 'background.paper',
+                      py: 1,
+                      borderRight: '1px solid',
+                      borderColor: 'divider',
+                    }}
+                  >
                     <FormControl fullWidth size="small" disabled={scheduleRosterCandidates.length === 0}>
-                      <InputLabel>Сотрудник</InputLabel>
+                      <InputLabel id="schedule-roster-employee-label">Сотрудник</InputLabel>
                       <Select
+                        labelId="schedule-roster-employee-label"
                         value={scheduleRosterEmployeeId}
                         label="Сотрудник"
                         onChange={(event) => setScheduleRosterEmployeeId(event.target.value)}
@@ -976,10 +1398,12 @@ const Employees: React.FC = () => {
                   </TableCell>
                   <TableCell colSpan={scheduleMonthDates.length} sx={{ py: 1 }}>
                     <Button
+                      size="small"
                       variant="outlined"
                       startIcon={<Add />}
                       onClick={handleAddRosterEmployee}
                       disabled={!scheduleRosterEmployeeId}
+                      sx={{ height: 40, minHeight: 40 }}
                     >
                       Добавить существующего сотрудника в график
                     </Button>
@@ -1021,33 +1445,57 @@ const Employees: React.FC = () => {
             </CardContent>
           </Card>
         </Grid>
-        <Grid item xs={12} xl={8}>
+        <Grid item xs={12} xl={8} sx={{ minWidth: 0 }}>
           <Card sx={toolbarCardSx}>
             <CardContent>
-              <Grid container spacing={2} alignItems="center">
-                <Grid item xs={12} md={4}>
-                  <TextField fullWidth placeholder="Поиск по имени, email или должности" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} InputProps={{ startAdornment: (<InputAdornment position="start"><Search /></InputAdornment>) }} />
+              <Grid
+                container
+                spacing={2}
+                alignItems="center"
+                sx={{
+                  '& .MuiOutlinedInput-root': {
+                    height: 40,
+                    boxSizing: 'border-box',
+                  },
+                  '& .MuiButton-root': {
+                    height: 40,
+                    minHeight: 40,
+                    boxSizing: 'border-box',
+                  },
+                }}
+              >
+                <Grid item xs={12} md={5}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    placeholder="Поиск по имени, email или должности"
+                    value={searchTerm}
+                    onChange={(event) => setSearchTerm(event.target.value)}
+                    InputProps={{
+                      startAdornment: (
+                        <InputAdornment position="start">
+                          <Search />
+                        </InputAdornment>
+                      ),
+                    }}
+                  />
                 </Grid>
                 <Grid item xs={12} md={2}>
-                  <FormControl fullWidth>
-                    <InputLabel>Роль</InputLabel>
-                    <Select value={filterRole} label="Роль" onChange={(event) => setFilterRole(event.target.value)}>
-                      <MenuItem value="all">Все</MenuItem>
-                      {roleOptions.map((role) => (<MenuItem key={role.value} value={role.value}>{role.label}</MenuItem>))}
-                    </Select>
-                  </FormControl>
-                </Grid>
-                <Grid item xs={12} md={2}>
-                  <FormControl fullWidth>
-                    <InputLabel>Статус</InputLabel>
-                    <Select value={filterStatus} label="Статус" onChange={(event) => setFilterStatus(event.target.value)}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel id="employees-filter-status-label">Статус</InputLabel>
+                    <Select
+                      labelId="employees-filter-status-label"
+                      value={filterStatus}
+                      label="Статус"
+                      onChange={(event) => setFilterStatus(event.target.value)}
+                    >
                       <MenuItem value="all">Все</MenuItem>
                       <MenuItem value="active">Активные</MenuItem>
                       <MenuItem value="inactive">Неактивные</MenuItem>
                     </Select>
                   </FormControl>
                 </Grid>
-                <PeriodFilter value={periodFilter} onChange={setPeriodFilter} />
+                <PeriodFilter value={periodFilter} onChange={setPeriodFilter} size="small" />
                 <Grid item xs={12} md={2}>
                   <Button
                     fullWidth
@@ -1055,7 +1503,6 @@ const Employees: React.FC = () => {
                     startIcon={<FilterList />}
                     onClick={() => {
                       setSearchTerm('');
-                      setFilterRole('all');
                       setFilterStatus('all');
                       setPeriodFilter(defaultPeriodFilterValue('month'));
                     }}
@@ -1067,15 +1514,21 @@ const Employees: React.FC = () => {
                   <Button fullWidth variant="outlined" onClick={() => setIsDirectoryDialogOpen(true)}>Справочники</Button>
                 </Grid>
                 <Grid item xs={12} md={3}>
-                  <Button fullWidth variant="contained" startIcon={<Add />} onClick={() => setIsAddDialogOpen(true)}>Добавить сотрудника</Button>
+                  <Button fullWidth variant="contained" startIcon={<Add />} onClick={() => { setAddDialogTab(0); setIsAddDialogOpen(true); }}>Добавить сотрудника</Button>
                 </Grid>
               </Grid>
             </CardContent>
           </Card>
 
+          {isAdmin && (
+            <Alert severity="info" icon={<AdminPanelSettings />} sx={{ mt: 2 }}>
+              Настройки доступа доступны только для сотрудников с ролью «Менеджер», «Техник» или «Кассир». У администратора полный доступ автоматически.
+            </Alert>
+          )}
+
           <Card sx={{ ...panelCardSx, mt: 3 }}>
             <CardContent>
-              <Box sx={{ height: 560, width: '100%' }}>
+              <Box sx={{ height: 560, width: '100%', minWidth: 0, overflow: 'hidden' }}>
                 <DataGrid
                   rows={filteredEmployees}
                   columns={columns}
@@ -1088,8 +1541,12 @@ const Employees: React.FC = () => {
                   disableSelectionOnClick
                   onRowDoubleClick={(params) => openEditDialog(params.row as Employee)}
                   sx={{
-                    border: 'none',
-                    '& .MuiDataGrid-columnSeparator': {
+                    ...dataGridSx,
+                    width: '100%',
+                    '& .MuiDataGrid-virtualScroller': {
+                      overflowX: 'hidden',
+                    },
+                    '& .MuiDataGrid-scrollbar--horizontal, & .MuiDataGrid-filler': {
                       display: 'none',
                     },
                   }}
@@ -1154,21 +1611,28 @@ const Employees: React.FC = () => {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={isAddDialogOpen} onClose={() => setIsAddDialogOpen(false)} maxWidth="md" fullWidth>
+      <Dialog open={isAddDialogOpen} onClose={() => setIsAddDialogOpen(false)} maxWidth="lg" fullWidth scroll="paper">
         <DialogTitle sx={sectionTitleSx}>Новый сотрудник</DialogTitle>
         <DialogContent>
-          <Grid container spacing={2} sx={{ mt: 1 }}>
+          {isAdmin && (
+            <Tabs
+              value={addDialogTab}
+              onChange={(_, value) => setAddDialogTab(value)}
+              sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}
+            >
+              <Tab label="Основные данные" />
+              {employeeNeedsAccessSettings(newEmployee) ? (
+                <Tab label="Доступ" icon={<AdminPanelSettings fontSize="small" />} iconPosition="start" />
+              ) : null}
+            </Tabs>
+          )}
+          {(addDialogTab === 0 || !isAdmin) && (
+          <Grid container spacing={2}>
             <Grid item xs={12} sm={6}><TextField fullWidth label="ФИО" value={newEmployee.name} onChange={(event) => setNewEmployee((prev) => ({ ...prev, name: event.target.value }))} /></Grid>
             <Grid item xs={12} sm={6}><TextField fullWidth label="Email (необязательно)" value={newEmployee.email} onChange={(event) => setNewEmployee((prev) => ({ ...prev, email: event.target.value }))} /></Grid>
             <Grid item xs={12} sm={6}><TextField fullWidth label="Телефон" value={newEmployee.phone} onChange={(event) => setNewEmployee((prev) => ({ ...prev, phone: event.target.value }))} /></Grid>
             <Grid item xs={12} sm={6}><TextField fullWidth label="Логин для входа" value={newEmployee.loginEmail} onChange={(event) => setNewEmployee((prev) => ({ ...prev, loginEmail: event.target.value }))} /></Grid>
             <Grid item xs={12} sm={6}><TextField fullWidth label="Пароль" value={newEmployee.password} onChange={(event) => setNewEmployee((prev) => ({ ...prev, password: event.target.value }))} /></Grid>
-            <Grid item xs={12} sm={6}>
-              <FormControl fullWidth>
-                <InputLabel>Роль</InputLabel>
-                <Select value={newEmployee.role} label="Роль" onChange={(event) => setNewEmployee((prev) => ({ ...prev, role: event.target.value }))}>{roleOptions.map((role) => <MenuItem key={role.value} value={role.value}>{role.label}</MenuItem>)}</Select>
-              </FormControl>
-            </Grid>
             <Grid item xs={12} sm={6}>
               <FormControl fullWidth>
                 <InputLabel>Должность</InputLabel>
@@ -1177,10 +1641,31 @@ const Employees: React.FC = () => {
             </Grid>
             <Grid item xs={12} sm={6}>
               <FormControl fullWidth>
-                <InputLabel>Отдел</InputLabel>
-                <Select value={newEmployee.department} label="Отдел" onChange={(event) => setNewEmployee((prev) => ({ ...prev, department: event.target.value }))}>{departmentNodes.map((department) => <MenuItem key={department.id} value={department.name}>{department.name}</MenuItem>)}</Select>
+                <InputLabel>Роль в системе</InputLabel>
+                <Select
+                  value={newEmployee.role}
+                  label="Роль в системе"
+                  onChange={(event) => {
+                    const role = event.target.value as Employee['role'];
+                    setNewEmployee((prev) => ({ ...prev, role }));
+                    if (role === 'admin') {
+                      setAddDialogTab(0);
+                    }
+                  }}
+                >
+                  {ROLE_OPTIONS.map((option) => (
+                    <MenuItem key={option.value} value={option.value}>
+                      {option.label}
+                    </MenuItem>
+                  ))}
+                </Select>
               </FormControl>
             </Grid>
+            {newEmployee.role === 'admin' && (
+              <Grid item xs={12}>
+                <Alert severity="success">Администратор имеет полный доступ ко всем разделам и настройкам CRM.</Alert>
+              </Grid>
+            )}
             <Grid item xs={12}><Typography variant="subtitle1" sx={{ mb: 1 }}>Сдельные проценты по заказу</Typography></Grid>
             <Grid item xs={12}>
               <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ px: 1 }}>
@@ -1193,6 +1678,13 @@ const Employees: React.FC = () => {
             <Grid item xs={12} sm={4}><TextField fullWidth label="Выдача, %" type="number" value={newEmployee.deliveryRate} onChange={(event) => setNewEmployee((prev) => ({ ...prev, deliveryRate: event.target.value }))} /></Grid>
             <Grid item xs={12}><TextField fullWidth label="Базовый оклад (необязательно)" type="number" value={newEmployee.salary} onChange={(event) => setNewEmployee((prev) => ({ ...prev, salary: event.target.value }))} InputProps={{ endAdornment: <InputAdornment position="end">₽</InputAdornment> }} /></Grid>
           </Grid>
+          )}
+          {isAdmin && employeeNeedsAccessSettings(newEmployee) && addDialogTab === 1 && (
+            <EmployeeAccessSettings
+              value={newEmployee}
+              onChange={(access) => setNewEmployee((prev) => ({ ...prev, ...access }))}
+            />
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setIsAddDialogOpen(false)}>Отмена</Button>
@@ -1200,21 +1692,28 @@ const Employees: React.FC = () => {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={isEditDialogOpen} onClose={() => setIsEditDialogOpen(false)} maxWidth="md" fullWidth>
+      <Dialog open={isEditDialogOpen} onClose={() => setIsEditDialogOpen(false)} maxWidth="lg" fullWidth scroll="paper">
         <DialogTitle sx={sectionTitleSx}>Редактирование сотрудника</DialogTitle>
         <DialogContent>
-          <Grid container spacing={2} sx={{ mt: 1 }}>
+          {isAdmin && (
+            <Tabs
+              value={editDialogTab}
+              onChange={(_, value) => setEditDialogTab(value)}
+              sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}
+            >
+              <Tab label="Основные данные" />
+              {employeeNeedsAccessSettings(editEmployee) ? (
+                <Tab label="Доступ" icon={<AdminPanelSettings fontSize="small" />} iconPosition="start" />
+              ) : null}
+            </Tabs>
+          )}
+          {(editDialogTab === 0 || !isAdmin) && (
+          <Grid container spacing={2}>
             <Grid item xs={12} sm={6}><TextField fullWidth label="ФИО" value={editEmployee.name} onChange={(event) => setEditEmployee((prev) => ({ ...prev, name: event.target.value }))} /></Grid>
             <Grid item xs={12} sm={6}><TextField fullWidth label="Email (необязательно)" value={editEmployee.email} onChange={(event) => setEditEmployee((prev) => ({ ...prev, email: event.target.value }))} /></Grid>
             <Grid item xs={12} sm={6}><TextField fullWidth label="Телефон" value={editEmployee.phone} onChange={(event) => setEditEmployee((prev) => ({ ...prev, phone: event.target.value }))} /></Grid>
             <Grid item xs={12} sm={6}><TextField fullWidth label="Логин для входа" value={editEmployee.loginEmail} onChange={(event) => setEditEmployee((prev) => ({ ...prev, loginEmail: event.target.value }))} /></Grid>
             <Grid item xs={12} sm={6}><TextField fullWidth label="Пароль" value={editEmployee.password} onChange={(event) => setEditEmployee((prev) => ({ ...prev, password: event.target.value }))} /></Grid>
-            <Grid item xs={12} sm={6}>
-              <FormControl fullWidth>
-                <InputLabel>Роль</InputLabel>
-                <Select value={editEmployee.role} label="Роль" onChange={(event) => setEditEmployee((prev) => ({ ...prev, role: event.target.value }))}>{roleOptions.map((role) => <MenuItem key={role.value} value={role.value}>{role.label}</MenuItem>)}</Select>
-              </FormControl>
-            </Grid>
             <Grid item xs={12} sm={6}>
               <FormControl fullWidth>
                 <InputLabel>Должность</InputLabel>
@@ -1223,10 +1722,31 @@ const Employees: React.FC = () => {
             </Grid>
             <Grid item xs={12} sm={6}>
               <FormControl fullWidth>
-                <InputLabel>Отдел</InputLabel>
-                <Select value={editEmployee.department} label="Отдел" onChange={(event) => setEditEmployee((prev) => ({ ...prev, department: event.target.value }))}>{departmentNodes.map((department) => <MenuItem key={department.id} value={department.name}>{department.name}</MenuItem>)}</Select>
+                <InputLabel>Роль в системе</InputLabel>
+                <Select
+                  value={editEmployee.role}
+                  label="Роль в системе"
+                  onChange={(event) => {
+                    const role = event.target.value as Employee['role'];
+                    setEditEmployee((prev) => ({ ...prev, role }));
+                    if (role === 'admin') {
+                      setEditDialogTab(0);
+                    }
+                  }}
+                >
+                  {ROLE_OPTIONS.map((option) => (
+                    <MenuItem key={option.value} value={option.value}>
+                      {option.label}
+                    </MenuItem>
+                  ))}
+                </Select>
               </FormControl>
             </Grid>
+            {editEmployee.role === 'admin' && (
+              <Grid item xs={12}>
+                <Alert severity="success">Администратор имеет полный доступ ко всем разделам и настройкам CRM.</Alert>
+              </Grid>
+            )}
             <Grid item xs={12}><Typography variant="subtitle1" sx={{ mb: 1 }}>Сдельные проценты по заказу</Typography></Grid>
             <Grid item xs={12}>
               <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ px: 1 }}>
@@ -1239,47 +1759,51 @@ const Employees: React.FC = () => {
             <Grid item xs={12} sm={4}><TextField fullWidth label="Выдача, %" type="number" value={editEmployee.deliveryRate} onChange={(event) => setEditEmployee((prev) => ({ ...prev, deliveryRate: event.target.value }))} /></Grid>
             <Grid item xs={12}><TextField fullWidth label="Базовый оклад (необязательно)" type="number" value={editEmployee.salary} onChange={(event) => setEditEmployee((prev) => ({ ...prev, salary: event.target.value }))} InputProps={{ endAdornment: <InputAdornment position="end">₽</InputAdornment> }} /></Grid>
           </Grid>
+          )}
+          {isAdmin && employeeNeedsAccessSettings(editEmployee) && editDialogTab === 1 && (
+            <EmployeeAccessSettings
+              value={editEmployee}
+              onChange={(access) => setEditEmployee((prev) => ({ ...prev, ...access }))}
+            />
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setIsEditDialogOpen(false)}>Отмена</Button>
           <Button variant="contained" onClick={handleUpdateEmployee}>Сохранить</Button>
         </DialogActions>
       </Dialog>
+
+      <Dialog open={isAccessDialogOpen} onClose={() => setIsAccessDialogOpen(false)} maxWidth="lg" fullWidth scroll="paper">
+        <DialogTitle sx={sectionTitleSx}>
+          Настройки доступа{selectedEmployee ? `: ${selectedEmployee.name}` : ''}
+        </DialogTitle>
+        <DialogContent>
+          <EmployeeAccessSettings value={accessForm} onChange={setAccessForm} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setIsAccessDialogOpen(false)}>Отмена</Button>
+          <Button variant="contained" onClick={handleSaveAccess}>Сохранить доступ</Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={isDirectoryDialogOpen} onClose={() => setIsDirectoryDialogOpen(false)} maxWidth="md" fullWidth>
         <DialogTitle sx={sectionTitleSx}>Справочники сотрудников</DialogTitle>
         <DialogContent>
-          <Grid container spacing={3} sx={{ mt: 1 }}>
-            <Grid item xs={12} md={6}>
-              <Typography variant="h6" gutterBottom>Отделы</Typography>
-              <Box display="flex" gap={1} mb={2}>
-                <TextField fullWidth label="Новый отдел" value={newDepartmentName} onChange={(event) => setNewDepartmentName(event.target.value)} />
-                <Button variant="contained" onClick={handleCreateDepartment}>Добавить</Button>
-              </Box>
-              <Box display="grid" gap={1}>
-                {departmentNodes.map((node) => (
-                  <Box key={node.id} display="flex" justifyContent="space-between" alignItems="center" sx={{ p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-                    <Typography>{node.name}</Typography>
-                    <IconButton size="small" onClick={() => handleDeleteDepartment(node)}><Delete fontSize="small" /></IconButton>
-                  </Box>
-                ))}
-              </Box>
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <Typography variant="h6" gutterBottom>Должности</Typography>
-              <Box display="flex" gap={1} mb={2}>
-                <TextField fullWidth label="Новая должность" value={newPositionName} onChange={(event) => setNewPositionName(event.target.value)} />
-                <Button variant="contained" onClick={handleCreatePosition}>Добавить</Button>
-              </Box>
-              <Box display="grid" gap={1}>
-                {positionNodes.map((node) => (
-                  <Box key={node.id} display="flex" justifyContent="space-between" alignItems="center" sx={{ p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-                    <Typography>{node.name}</Typography>
-                    <IconButton size="small" onClick={() => handleDeletePosition(node)}><Delete fontSize="small" /></IconButton>
-                  </Box>
-                ))}
-              </Box>
-            </Grid>
-          </Grid>
+          <Box sx={{ mt: 1 }}>
+            <Typography variant="h6" gutterBottom>Должности</Typography>
+            <Box display="flex" gap={1} mb={2}>
+              <TextField fullWidth label="Новая должность" value={newPositionName} onChange={(event) => setNewPositionName(event.target.value)} />
+              <Button variant="contained" onClick={handleCreatePosition}>Добавить</Button>
+            </Box>
+            <Box display="grid" gap={1}>
+              {positionNodes.map((node) => (
+                <Box key={node.id} display="flex" justifyContent="space-between" alignItems="center" sx={{ p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
+                  <Typography>{node.name}</Typography>
+                  <IconButton size="small" onClick={() => handleDeletePosition(node)}><Delete fontSize="small" /></IconButton>
+                </Box>
+              ))}
+            </Box>
+          </Box>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setIsDirectoryDialogOpen(false)}>Закрыть</Button>
@@ -1297,18 +1821,66 @@ const Employees: React.FC = () => {
                 <Card sx={panelCardSx}>
                   <CardContent>
                     <Typography variant="h6" gutterBottom>График работы</Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                      В один день могут работать несколько сотрудников с разным временем — например, смены по полдня.
+                    </Typography>
                     <Grid container spacing={2}>
                       <Grid item xs={12} sm={6}>
                         <TextField fullWidth type="date" label="Дата" InputLabelProps={{ shrink: true }} value={scheduleForm.date} onChange={(event) => setScheduleForm((prev) => ({ ...prev, date: event.target.value }))} />
                       </Grid>
                       <Grid item xs={6} sm={3}>
-                        <TextField fullWidth type="time" label="Начало" InputLabelProps={{ shrink: true }} value={scheduleForm.startTime} onChange={(event) => setScheduleForm((prev) => ({ ...prev, startTime: event.target.value }))} disabled={scheduleForm.isDayOff} />
+                        <TextField
+                          fullWidth
+                          type="time"
+                          label="Начало"
+                          InputLabelProps={{ shrink: true }}
+                          value={scheduleForm.startTime}
+                          onChange={(event) => setScheduleForm((prev) => ({ ...prev, startTime: event.target.value }))}
+                          onBlur={(event) => void handleScheduleFieldPersist({ startTime: event.target.value })}
+                          disabled={scheduleForm.isDayOff || isSavingSchedule}
+                        />
                       </Grid>
                       <Grid item xs={6} sm={3}>
-                        <TextField fullWidth type="time" label="Конец" InputLabelProps={{ shrink: true }} value={scheduleForm.endTime} onChange={(event) => setScheduleForm((prev) => ({ ...prev, endTime: event.target.value }))} disabled={scheduleForm.isDayOff} />
+                        <TextField
+                          fullWidth
+                          type="time"
+                          label="Конец"
+                          InputLabelProps={{ shrink: true }}
+                          value={scheduleForm.endTime}
+                          onChange={(event) => setScheduleForm((prev) => ({ ...prev, endTime: event.target.value }))}
+                          onBlur={(event) => void handleScheduleFieldPersist({ endTime: event.target.value })}
+                          disabled={scheduleForm.isDayOff || isSavingSchedule}
+                        />
                       </Grid>
                       <Grid item xs={12}>
-                        <TextField fullWidth label="Локация" value={scheduleForm.location} onChange={(event) => setScheduleForm((prev) => ({ ...prev, location: event.target.value }))} />
+                        {scheduleLocationOptions.length > 0 ? (
+                          <FormControl fullWidth>
+                            <InputLabel>Локация</InputLabel>
+                            <Select
+                              value={scheduleForm.location}
+                              label="Локация"
+                              onChange={(event) =>
+                                setScheduleForm((prev) => ({ ...prev, location: event.target.value }))
+                              }
+                            >
+                              {scheduleLocationOptions.map((locationName) => (
+                                <MenuItem key={locationName} value={locationName}>
+                                  {locationName}
+                                </MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                        ) : (
+                          <TextField
+                            fullWidth
+                            label="Локация"
+                            value={scheduleForm.location}
+                            onChange={(event) =>
+                              setScheduleForm((prev) => ({ ...prev, location: event.target.value }))
+                            }
+                            helperText="Локация смены для этой точки"
+                          />
+                        )}
                       </Grid>
                       <Grid item xs={12}>
                         <TextField fullWidth multiline minRows={2} label="Комментарий" value={scheduleForm.note} onChange={(event) => setScheduleForm((prev) => ({ ...prev, note: event.target.value }))} />
@@ -1316,12 +1888,28 @@ const Employees: React.FC = () => {
                       <Grid item xs={12}>
                         <Box display="flex" justifyContent="space-between" alignItems="center">
                           <Typography>Выходной день</Typography>
-                          <Switch checked={scheduleForm.isDayOff} onChange={(event) => setScheduleForm((prev) => ({ ...prev, isDayOff: event.target.checked }))} />
+                          <Switch
+                            checked={scheduleForm.isDayOff}
+                            disabled={isSavingSchedule}
+                            onChange={(event) => void handleScheduleDayOffChange(event.target.checked)}
+                          />
                         </Box>
                       </Grid>
                       <Grid item xs={12}>
-                        <Button fullWidth variant="contained" startIcon={<CalendarMonth />} onClick={handleSaveSchedule}>
-                          {scheduleForm.id ? 'Сохранить смену' : 'Добавить смену'}
+                        <Button
+                          fullWidth
+                          variant="contained"
+                          startIcon={<CalendarMonth />}
+                          disabled={isSavingSchedule}
+                          onClick={handleSaveSchedule}
+                        >
+                          {scheduleForm.isDayOff
+                            ? scheduleForm.id
+                              ? 'Сохранить выходной'
+                              : 'Отметить выходной'
+                            : scheduleForm.id
+                              ? 'Сохранить смену'
+                              : 'Добавить смену'}
                         </Button>
                       </Grid>
                     </Grid>
@@ -1340,7 +1928,10 @@ const Employees: React.FC = () => {
                             </Box>
                             <Box>
                               <IconButton size="small" onClick={() => setScheduleForm({ ...emptyScheduleForm, ...entry })}><Edit fontSize="small" /></IconButton>
-                              <IconButton size="small" onClick={async () => { await employeeWorkService.deleteScheduleEntry(entry.id); await refreshEmployees(); }}><Delete fontSize="small" /></IconButton>
+                              <IconButton size="small" onClick={async () => {
+                                const saved = await employeeWorkService.deleteScheduleEntry(entry.id);
+                                applyWorkSettings(saved);
+                              }}><Delete fontSize="small" /></IconButton>
                             </Box>
                           </Stack>
                         </Box>
@@ -1410,7 +2001,10 @@ const Employees: React.FC = () => {
                             <Stack direction="row" alignItems="center" gap={0.5}>
                               <IconButton size="small" onClick={() => setTaskForm({ ...emptyTaskForm, ...task, progress: String(task.progress) })}><Edit fontSize="small" /></IconButton>
                               <IconButton size="small" onClick={() => handleTaskProgressChange(task, task.status === 'done' ? 'in_progress' : 'done', task.status === 'done' ? 50 : 100)}><Assignment fontSize="small" /></IconButton>
-                              <IconButton size="small" onClick={async () => { await employeeWorkService.deleteTask(task.id); await refreshEmployees(); }}><Delete fontSize="small" /></IconButton>
+                              <IconButton size="small" onClick={async () => {
+                                const saved = await employeeWorkService.deleteTask(task.id);
+                                applyWorkSettings(saved);
+                              }}><Delete fontSize="small" /></IconButton>
                             </Stack>
                           </Stack>
                         </Box>
@@ -1432,7 +2026,6 @@ const Employees: React.FC = () => {
         <DialogContent>
           {selectedEmployee && (() => {
             const employee = employeesWithMetrics.find((item) => item.id === selectedEmployee.id) || (selectedEmployee as EmployeeWithMetrics);
-            const roleLabel = roleOptions.find((role) => role.value === employee.role)?.label || employee.role;
 
             return (
               <Grid container spacing={2} sx={{ mt: 1 }}>
@@ -1451,8 +2044,8 @@ const Employees: React.FC = () => {
                 <Grid item xs={12} sm={6}><Typography variant="subtitle2" color="text.secondary">Телефон</Typography><Typography>{employee.phone}</Typography></Grid>
                 <Grid item xs={12} sm={6}><Typography variant="subtitle2" color="text.secondary">Логин</Typography><Typography>{employee.loginEmail || employee.email}</Typography></Grid>
                 <Grid item xs={12} sm={6}><Typography variant="subtitle2" color="text.secondary">Доступ в CRM</Typography><Typography>{employee.canLogin !== false ? 'Разрешен' : 'Отключен'}</Typography></Grid>
-                <Grid item xs={12} sm={6}><Typography variant="subtitle2" color="text.secondary">Роль</Typography><Chip label={roleLabel} color="primary" size="small" /></Grid>
-                <Grid item xs={12} sm={6}><Typography variant="subtitle2" color="text.secondary">Отдел</Typography><Typography>{employee.department}</Typography></Grid>
+                <Grid item xs={12} sm={6}><Typography variant="subtitle2" color="text.secondary">Должность</Typography><Typography>{employee.position || '—'}</Typography></Grid>
+                <Grid item xs={12} sm={6}><Typography variant="subtitle2" color="text.secondary">Роль в системе</Typography><Typography>{ROLE_OPTIONS.find((option) => option.value === employee.role)?.label || employee.role}</Typography></Grid>
                 <Grid item xs={12} sm={6}><Typography variant="subtitle2" color="text.secondary">Рейтинг</Typography><Box display="flex" alignItems="center"><Star sx={{ color: 'gold', fontSize: 16, mr: 0.5 }} /><Typography>{employee.rating}</Typography></Box></Grid>
                 <Grid item xs={12} sm={6}><Typography variant="subtitle2" color="text.secondary">Сдельный доход</Typography><Typography fontWeight={700}>{employee.totalEarnings.toLocaleString('ru-RU')} ₽</Typography></Grid>
                 <Grid item xs={12} sm={6}><Typography variant="subtitle2" color="text.secondary">Выручка сервису</Typography><Typography fontWeight={700}>{employee.serviceRevenue.toLocaleString('ru-RU')} ₽</Typography></Grid>
@@ -1462,11 +2055,62 @@ const Employees: React.FC = () => {
                 <Grid item xs={12} sm={4}><Typography variant="subtitle2" color="text.secondary">Исполнил заказов</Typography><Typography fontWeight={700}>{employee.orderStats?.executionOrders || 0}</Typography></Grid>
                 <Grid item xs={12} sm={4}><Typography variant="subtitle2" color="text.secondary">Выдал заказов</Typography><Typography fontWeight={700}>{employee.orderStats?.deliveryOrders || 0}</Typography></Grid>
                 <Grid item xs={12}><Typography variant="subtitle2" color="text.secondary">Дата найма</Typography><Typography>{employee.hireDate.toLocaleDateString('ru-RU')}</Typography></Grid>
+                {isAdmin && employeeNeedsAccessSettings(employee) && (
+                  <>
+                    <Grid item xs={12}>
+                      <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>Разделы CRM</Typography>
+                      <Box display="flex" flexWrap="wrap" gap={1}>
+                        {CRM_MODULE_OPTIONS.filter((module) =>
+                          normalizeAllowedModules(employee.access?.allowedModules).includes(module.path)
+                        ).map((module) => (
+                          <Chip key={module.path} label={module.label} size="small" color="primary" variant="outlined" />
+                        ))}
+                      </Box>
+                    </Grid>
+                    <Grid item xs={12}>
+                      <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>Разделы настроек в «Мой профиль»</Typography>
+                      <Box display="flex" flexWrap="wrap" gap={1}>
+                        {SETTINGS_SECTION_OPTIONS.filter((section) =>
+                          normalizeVisibleSections(employee.access?.visibleSections).includes(section.key)
+                        ).map((section) => (
+                          <Chip key={section.key} label={section.label} size="small" variant="outlined" />
+                        ))}
+                      </Box>
+                    </Grid>
+                    <Grid item xs={12}>
+                      <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>Редактирование профиля</Typography>
+                      <Box display="flex" flexWrap="wrap" gap={1}>
+                        {SELF_EDITABLE_FIELD_OPTIONS.filter((field) =>
+                          normalizeSelfEditableFields(employee.access?.selfEditableFields).includes(field.key)
+                        ).map((field) => (
+                          <Chip key={field.key} label={field.label} size="small" variant="outlined" />
+                        ))}
+                      </Box>
+                    </Grid>
+                  </>
+                )}
+                {isAdmin && !employeeNeedsAccessSettings(employee) && (
+                  <Grid item xs={12}>
+                    <Alert severity="success">Администратор — полный доступ ко всем разделам CRM и настройкам компании.</Alert>
+                  </Grid>
+                )}
               </Grid>
             );
           })()}
         </DialogContent>
         <DialogActions>
+          {isAdmin && selectedEmployee && employeeNeedsAccessSettings(selectedEmployee) && (
+            <Button
+              startIcon={<AdminPanelSettings />}
+              onClick={() => {
+                setIsViewDialogOpen(false);
+                openAccessDialog(selectedEmployee);
+              }}
+            >
+              Настроить доступ
+            </Button>
+          )}
+          <Box sx={{ flex: 1 }} />
           <Button onClick={() => setIsViewDialogOpen(false)}>Закрыть</Button>
         </DialogActions>
       </Dialog>
