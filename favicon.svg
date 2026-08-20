@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="_Слой_1" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 64 64">
+  <!-- Generator: Adobe Illustrator 30.0.0, SVG Export Plug-In . SVG Version: 2.1.1 Build 123)  -->
+  <defs>
+    <style>
+      .st0 {
+        fill: #e24c12;
+      }
+    </style>
+  </defs>
+  <g>
+    <polygon class="st0" points="43.84 9.39 32 2.56 28.03 4.85 43.84 13.97 43.84 9.39"/>
+    <polygon class="st0" points="47.82 11.69 47.82 16.27 53.26 19.41 53.25 19.42 53.51 19.58 53.51 44.42 32 56.84 20.5 50.21 20.5 54.8 32 61.44 57.5 46.72 57.5 17.28 47.82 11.69"/>
+    <path class="st0" d="M20.5,44.85v9.91h3.98v-9.91h-3.98Z"/>
+    <polyline class="st0" points="43.84 19.31 43.84 9.4 39.86 9.4 39.86 19.31"/>
+  </g>
+  <polygon class="st0" points="10.49 19.58 28.03 9.45 24.05 7.15 6.5 17.28 6.5 46.72 16.51 52.5 16.51 47.91 10.49 44.42 10.49 19.58"/>
+  <path class="st0" d="M24.48,19.48l-3.98,3.63v21.91h3.98v-25.54h0Z"/>
+  <path class="st0" d="M39.86,44.77l3.98-3.63v-21.91h-3.98v25.54h0Z"/>
+  <rect class="st0" x="30.18" y="22.97" width="3.98" height="19.76" transform="translate(-6.45 57.8) rotate(-78.46)"/>
+</svg>

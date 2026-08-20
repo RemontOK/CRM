@@ -1,0 +1,1 @@
+import o from"./purify.es-Cz4mVeUR-mt10vso6.js";const i=t=>o.sanitize(t,{USE_PROFILES:{html:!0},FORBID_TAGS:["script","style","iframe","object","embed","form","input","button"],FORBID_ATTR:["formaction","srcdoc"]});export{i as s};

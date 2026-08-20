@@ -1,0 +1,1 @@
+import{d as e,j as s}from"./index-CjsSBA33-mt10vso6.js";class a{async getMarketing(){return e.get("/auth/consents/marketing")}async setMarketing(r,t){try{return await e.post("/auth/consents/marketing",{granted:r,documentVersion:t})}catch(n){throw new Error(s(n,"Не удалось сохранить настройку рассылки"))}}}const i=new a;export{i as c};

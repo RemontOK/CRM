@@ -1,0 +1,35 @@
+User-agent: *
+Allow: /$
+Allow: /welcome
+Allow: /register
+Allow: /login
+Allow: /documents/
+
+# Внутренние разделы CRM — за авторизацией, индексировать нечего
+Disallow: /api/
+Disallow: /dashboard
+Disallow: /board
+Disallow: /orders
+Disallow: /clients
+Disallow: /inventory
+Disallow: /employees
+Disallow: /cash-register
+Disallow: /reports
+Disallow: /settings
+Disallow: /my-profile
+Disallow: /messages
+Disallow: /subscribe
+Disallow: /onboarding
+Disallow: /platform-admin
+Disallow: /verify-email
+Disallow: /auth/
+
+# Служебные файлы сборки
+Disallow: /assets/
+Disallow: /tinymce/
+Disallow: /build-version.json
+
+Clean-param: _v&utm_source&utm_medium&utm_campaign&utm_content&utm_term
+
+Host: https://nakcrm.ru
+Sitemap: https://nakcrm.ru/sitemap.xml
